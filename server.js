@@ -12,14 +12,15 @@ const app = express();
 const server = http.createServer(app);
 
 // Initialize Socket.io with CORS enabled
+// Initialize Socket.io with CORS enabled for all origins
 const io = new Server(server, {
   cors: {
-    origin: 'http://localhost:5173',
+    origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
   },
 });
 
-app.use(cors());
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
 // Pass socket instance to controllers via Express app state
