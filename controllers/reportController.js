@@ -1,148 +1,100 @@
 const Report = require('../models/Report');
-const User = require('../models/User');
 
-const createReport = async (req, res) => {
+/**
+ * GET /api/e-tapok/reports
+ * Retrieve all reports sorted newest first
+ */
+exports.getAllReports = async (req, res) => {
   try {
-    const { wasteType, addressText, latitude, longitude, aiAssisted } = req.body;
+    const reports = await Report.find().sort({ createdAt: -1 });
+    return res.status(200).json(reports);
+  } catch (err) {
+    console.error('SERVER ERROR IN GET ALL REPORTS:', err);
+    return res.status(500).json({
+      message: 'Failed to retrieve reports from database.',
+      error: err.message,
+    });
+  }
+};
 
-    const report = await Report.create({
-      residentId: req.user._id,
-      wasteType,
-      addressText,
-      latitude: latitude || 0,
-      longitude: longitude || 0,
-      aiAssisted: aiAssisted || false,
+/**
+ * POST /api/e-tapok/reports
+ * Create a new waste report with safe fallbacks
+ */
+exports.createReport = async (req, res) => {
+  try {
+    const { description, wasteType, locationName, imageUrl, barangay, userName } = req.body;
+
+    if (!description || typeof description !== 'string' || !description.trim()) {
+      return res.status(400).json({ message: 'Waste description is required.' });
+    }
+
+    const validWasteTypes = ['Malata', 'Dili Malata'];
+    const normalizedWasteType = validWasteTypes.includes(wasteType) ? wasteType : 'Malata';
+
+    const newReport = new Report({
+      description: description.trim(),
+      wasteType: normalizedWasteType,
+      locationName: locationName || 'Unspecified Location',
+      imageUrl: imageUrl || '',
+      barangay: barangay || req.user?.barangay || 'Barangay Central',
+      userId: req.user?._id || null,
+      userName: userName || req.user?.name || 'Anonymous Resident',
+      status: 'Pending',
     });
 
-    // Broadcast new report event to all connected clients
-    const io = req.app.get('io');
-    if (io) {
-      io.emit('report:created', report);
+    const savedReport = await newReport.save();
+
+    if (req.io && typeof req.io.emit === 'function') {
+      req.io.emit('report_created', savedReport);
     }
 
-    res.status(201).json({ success: true, data: report });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-const getReports = async (req, res) => {
-  try {
-    const { search, status, wasteType } = req.query;
-    let query = {};
-
-    if (status) query.status = status;
-    if (wasteType) query.wasteType = wasteType;
-    if (search) {
-      query.addressText = { $regex: search, $options: 'i' };
-    }
-
-    const reports = await Report.find(query)
-      .populate('residentId', 'name barangay accountabilityScore')
-      .sort({ createdAt: -1 });
-
-    res.status(200).json({ success: true, count: reports.length, data: reports });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-const collectReport = async (req, res) => {
-  try {
-    const report = await Report.findById(req.params.id);
-
-    if (!report) {
-      return res.status(404).json({ success: false, message: 'Report not found' });
-    }
-
-    if (report.status === 'Collected') {
-      return res.status(400).json({ success: false, message: 'Report already collected' });
-    }
-
-    report.status = 'Collected';
-    report.collectorId = req.user._id;
-    report.collectedAt = Date.now();
-    await report.save();
-
-    await User.findByIdAndUpdate(report.residentId, {
-      $inc: { accountabilityScore: 10 },
+    return res.status(201).json(savedReport);
+  } catch (err) {
+    console.error('SERVER ERROR IN CREATE REPORT:', err);
+    return res.status(500).json({
+      message: 'Server error while creating report.',
+      error: err.message,
     });
-
-    // Broadcast collection event to all connected clients
-    const io = req.app.get('io');
-    if (io) {
-      io.emit('report:collected', report);
-    }
-
-    res.status(200).json({
-      success: true,
-      message: 'Pickup completed and resident score rewarded',
-      data: report,
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
   }
 };
 
-const deleteReport = async (req, res) => {
+/**
+ * PUT /api/e-tapok/reports/:id/status
+ * Update report collection status
+ */
+exports.updateReportStatus = async (req, res) => {
   try {
-    const report = await Report.findById(req.params.id);
+    const { id } = req.params;
+    const { status } = req.body;
 
-    if (!report) {
-      return res.status(404).json({ success: false, message: 'Report not found' });
+    const validStatuses = ['Pending', 'In Progress', 'Collected'];
+    if (!status || !validStatuses.includes(status)) {
+      return res.status(400).json({
+        message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`,
+      });
     }
 
-    if (report.residentId.toString() !== req.user._id.toString() && req.user.role !== 'Admin') {
-      return res.status(401).json({ success: false, message: 'Not authorized to delete this report' });
+    const updatedReport = await Report.findByIdAndUpdate(
+      id,
+      { status },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedReport) {
+      return res.status(404).json({ message: 'Report not found.' });
     }
 
-    await report.deleteOne();
-
-    // Broadcast deletion event to all connected clients
-    const io = req.app.get('io');
-    if (io) {
-      io.emit('report:deleted', req.params.id);
+    if (req.io && typeof req.io.emit === 'function') {
+      req.io.emit('report_updated', updatedReport);
     }
 
-    res.status(200).json({ success: true, message: 'Report deleted successfully' });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-// @desc Get waste metrics and LGU summary analytics
-// @route GET /api/e-tapok/reports/analytics
-const getAnalytics = async (req, res) => {
-  try {
-    const totalReports = await Report.countDocuments();
-    const pendingReports = await Report.countDocuments({ status: 'Pending' });
-    const collectedReports = await Report.countDocuments({ status: 'Collected' });
-    const malataCount = await Report.countDocuments({ wasteType: 'Malata' });
-    const diliMalataCount = await Report.countDocuments({ wasteType: 'Dili Malata' });
-
-    const collectionRate = totalReports > 0 ? Math.round((collectedReports / totalReports) * 100) : 0;
-    const malataPercentage = totalReports > 0 ? Math.round((malataCount / totalReports) * 100) : 0;
-
-    res.status(200).json({
-      success: true,
-      data: {
-        totalReports,
-        pendingReports,
-        collectedReports,
-        malataCount,
-        diliMalataCount,
-        collectionRate,
-        malataPercentage,
-      },
+    return res.status(200).json(updatedReport);
+  } catch (err) {
+    console.error('SERVER ERROR IN UPDATE STATUS:', err);
+    return res.status(500).json({
+      message: 'Server error while updating report status.',
+      error: err.message,
     });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
   }
-};
-
-module.exports = {
-  createReport,
-  getReports,
-  collectReport,
-  deleteReport,
-  getAnalytics,
 };

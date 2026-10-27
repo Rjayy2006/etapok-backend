@@ -1,749 +1,640 @@
-import React, { useState, useEffect } from 'react';
-import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import axios from 'axios';
 import { io } from 'socket.io-client';
-import L from 'leaflet';
+import { useOnlineStatus } from './hooks/useOnlineStatus';
+import {
+  saveReportOffline,
+  getOfflineReports,
+  deleteOfflineReport,
+} from './utils/offlineStore';
 
-const API_BASE_URL = 'http://localhost:5000/api/e-tapok';
-const SOCKET_URL = 'http://localhost:5000';
-
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-});
-
-const createCustomIcon = (color) =>
-  new L.Icon({
-    iconUrl: `https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-${color}.png`,
-    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
-    iconSize: [25, 41],
-    iconAnchor: [12, 41],
-    popupAnchor: [1, -34],
-    shadowSize: [41, 41],
-  });
-
-const redIcon = createCustomIcon('red');
-const greenIcon = createCustomIcon('green');
+const API_BASE_URL = 'https://etapok-backend.onrender.com/api/e-tapok';
+const SOCKET_URL = 'https://etapok-backend.onrender.com';
 
 export default function App() {
-  const [currentUser, setCurrentUser] = useState(null);
+  const isOnline = useOnlineStatus();
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [publicView, setPublicView] = useState('public');
+
+  // Auth State
   const [token, setToken] = useState(localStorage.getItem('etapok_token') || '');
+  const [user, setUser] = useState(
+    JSON.parse(localStorage.getItem('etapok_user') || 'null')
+  );
 
-  // Auth Form States
-  const [isRegistering, setIsRegistering] = useState(false);
-  const [authName, setAuthName] = useState('');
-  const [authEmail, setAuthEmail] = useState('');
-  const [authPassword, setAuthPassword] = useState('');
-  const [authRole, setAuthRole] = useState('Resident');
-  const [authBarangay, setAuthBarangay] = useState('Brgy. Central');
-
-  // App & Reports States
-  const [reports, setReports] = useState([]);
-  const [viewMode, setViewMode] = useState('list');
-  const [addressText, setAddressText] = useState('');
-  const [wasteType, setWasteType] = useState('Malata');
-  const [searchQuery, setSearchQuery] = useState('');
-
-  // Analytics State (Phase 3)
-  const [analytics, setAnalytics] = useState({
-    totalReports: 0,
-    pendingReports: 0,
-    collectedReports: 0,
-    malataCount: 0,
-    diliMalataCount: 0,
-    collectionRate: 0,
-    malataPercentage: 0,
+  const [authFormData, setAuthFormData] = useState({
+    name: '',
+    email: '',
+    password: '',
+    role: 'Resident',
+    barangay: 'Barangay Central',
   });
 
-  // AI Helper States
-  const [aiInput, setAiInput] = useState('');
-  const [imagePreview, setImagePreview] = useState(null);
-  const [aiResponse, setAiResponse] = useState(null);
-  const [isAiLoading, setIsAiLoading] = useState(false);
+  // Data & App Navigation State
+  const [reports, setReports] = useState([]);
+  const [activeTab, setActiveTab] = useState('reports');
+  const [filterWasteType, setFilterWasteType] = useState('All');
+  const [toast, setToast] = useState(null);
 
-  // Rewards & Toasts
-  const [showRewardsModal, setShowRewardsModal] = useState(false);
-  const [toasts, setToasts] = useState([]);
-  const [pointHistory, setPointHistory] = useState([
-    { id: 1, action: 'Initial Welcome Bonus', points: '+100', date: 'Account Creation' }
-  ]);
+  // AI Classification State
+  const [aiImage, setAiImage] = useState('');
+  const [aiDesc, setAiDesc] = useState('');
+  const [aiResult, setAiResult] = useState(null);
+  const [aiAnalyzing, setAiAnalyzing] = useState(false);
 
-  const showToast = (message, type = 'success') => {
-    const id = Date.now();
-    setToasts((prev) => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 3500);
+  // Waste Submission Form State
+  const [newReport, setNewReport] = useState({
+    description: '',
+    wasteType: 'Malata',
+    locationName: 'Main Street Corner, Zone 2',
+    imageUrl: '',
+  });
+
+  const socketRef = useRef(null);
+
+  const showToast = (message, type = 'info') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 4000);
   };
 
-  const fetchUserProfile = async (authToken) => {
+  // ---------------------------------------------------------------------------
+  // FETCH REPORTS & WEBSOCKET SYNC
+  // ---------------------------------------------------------------------------
+  const fetchReports = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/auth/me`, {
-        headers: { Authorization: `Bearer ${authToken}` }
-      });
-      const data = await res.json();
-      if (data.success) {
-        setCurrentUser(data.user);
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      const res = await axios.get(`${API_BASE_URL}/reports`, { headers });
+      
+      if (Array.isArray(res.data)) {
+        setReports(res.data);
+      } else if (res.data && Array.isArray(res.data.reports)) {
+        setReports(res.data.reports);
       } else {
-        handleLogout();
+        setReports([]);
       }
     } catch (err) {
-      handleLogout();
-    }
-  };
-
-  const fetchAnalytics = async () => {
-    if (!token) return;
-    try {
-      const res = await fetch(`${API_BASE_URL}/reports/analytics`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const data = await res.json();
-      if (data.success) {
-        setAnalytics(data.data);
-      }
-    } catch (err) {
-      console.error('Analytics fetch error:', err);
-    }
-  };
-
-  useEffect(() => {
-    if (token) {
-      fetchUserProfile(token);
+      console.error('Error fetching reports:', err);
+      setReports([]);
     }
   }, [token]);
 
-  // Real-Time Socket.io Listeners
+  // Offline Auto-Sync Logic
+  const syncOfflineReports = useCallback(async () => {
+    if (!isOnline || !token) return;
+    try {
+      const offlineData = await getOfflineReports();
+      if (!offlineData || offlineData.length === 0) return;
+      
+      setIsSyncing(true);
+      for (const item of offlineData) {
+        try {
+          await axios.post(`${API_BASE_URL}/reports`, item, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          await deleteOfflineReport(item.id);
+        } catch (e) {
+          console.error('Failed to sync offline item', item, e);
+        }
+      }
+      showToast('Offline reports synchronized successfully!', 'success');
+      fetchReports();
+    } catch (err) {
+      console.error('Error during sync:', err);
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [isOnline, token, fetchReports]);
+
   useEffect(() => {
-    const socket = io(SOCKET_URL);
+    fetchReports();
 
-    socket.on('report:created', (newReport) => {
-      setReports((prev) => [newReport, ...prev.filter((r) => r._id !== newReport._id)]);
-      showToast(`📍 New Pickup Request: ${newReport.addressText}`, 'info');
-      fetchAnalytics();
+    socketRef.current = io(SOCKET_URL, { transports: ['websocket', 'polling'] });
+
+    socketRef.current.on('report_created', (data) => {
+      setReports((prev) => (Array.isArray(prev) ? [data, ...prev] : [data]));
     });
 
-    socket.on('report:collected', (updatedReport) => {
+    socketRef.current.on('report_updated', (updated) => {
       setReports((prev) =>
-        prev.map((r) => (r._id === updatedReport._id ? updatedReport : r))
+        Array.isArray(prev) ? prev.map((r) => (r._id === updated._id ? updated : r)) : []
       );
-      showToast(`✅ Pickup Completed at ${updatedReport.addressText}`, 'success');
-      if (token) fetchUserProfile(token);
-      fetchAnalytics();
-    });
-
-    socket.on('report:deleted', (deletedId) => {
-      setReports((prev) => prev.filter((r) => r._id !== deletedId));
-      fetchAnalytics();
     });
 
     return () => {
-      socket.disconnect();
+      if (socketRef.current) socketRef.current.disconnect();
     };
-  }, [token]);
+  }, [fetchReports]);
 
-  const handleAuth = async (e) => {
+  useEffect(() => {
+    if (isOnline) {
+      syncOfflineReports();
+    }
+  }, [isOnline, syncOfflineReports]);
+
+  // ---------------------------------------------------------------------------
+  // AUTHENTICATION HANDLERS
+  // ---------------------------------------------------------------------------
+  const handleAuthSubmit = async (e) => {
     e.preventDefault();
-    const endpoint = isRegistering ? '/auth/register' : '/auth/login';
-    const payload = isRegistering
-      ? { name: authName, email: authEmail, password: authPassword, role: authRole, barangay: authBarangay }
-      : { email: authEmail, password: authPassword };
-
+    const endpoint = publicView === 'login' ? '/auth/login' : '/auth/register';
     try {
-      const res = await fetch(`${API_BASE_URL}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const data = await res.json();
-      if (data.success) {
-        localStorage.setItem('etapok_token', data.token);
-        setToken(data.token);
-        setCurrentUser(data.user);
-        showToast(`Welcome ${data.user.name}!`, 'success');
-      } else {
-        showToast(data.message, 'error');
-      }
+      const res = await axios.post(`${API_BASE_URL}${endpoint}`, authFormData);
+      const { token: userToken, user: userData } = res.data;
+
+      localStorage.setItem('etapok_token', userToken);
+      localStorage.setItem('etapok_user', JSON.stringify(userData));
+
+      setToken(userToken);
+      setUser(userData);
+      showToast(`Welcome back, ${userData.name}!`, 'success');
     } catch (err) {
-      showToast('Authentication server error', 'error');
+      const errMsg = err.response?.data?.message || 'Authentication failed.';
+      showToast(errMsg, 'error');
     }
   };
 
   const handleLogout = () => {
     localStorage.removeItem('etapok_token');
+    localStorage.removeItem('etapok_user');
     setToken('');
-    setCurrentUser(null);
+    setUser(null);
+    setPublicView('public');
+    showToast('Signed out successfully.', 'info');
   };
 
-  const fetchReports = async () => {
-    try {
-      const url = searchQuery
-        ? `${API_BASE_URL}/reports?search=${encodeURIComponent(searchQuery)}`
-        : `${API_BASE_URL}/reports`;
-      const res = await fetch(url);
-      const data = await res.json();
-      if (data.success) {
-        setReports(data.data);
-      }
-    } catch (err) {
-      console.error('Error fetching reports:', err);
-    }
-  };
-
-  useEffect(() => {
-    if (currentUser) {
-      fetchReports();
-      fetchAnalytics();
-    }
-  }, [currentUser, searchQuery]);
-
-  const handleImageChange = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => setImagePreview(reader.result);
-      reader.readAsDataURL(file);
-    }
-  };
-
-  const handleAddReport = async (e) => {
+  // ---------------------------------------------------------------------------
+  // REPORT MANAGEMENT (SUBMIT & STATUS UPDATE)
+  // ---------------------------------------------------------------------------
+  const handleCreateReport = async (e) => {
     e.preventDefault();
-    if (!addressText) return;
+    if (!newReport.description) {
+      showToast('Please provide a waste description.', 'warning');
+      return;
+    }
 
-    const mockLat = 10.1333 + (Math.random() - 0.5) * 0.02;
-    const mockLng = 124.8500 + (Math.random() - 0.5) * 0.02;
+    const reportPayload = {
+      ...newReport,
+      barangay: user?.barangay || 'Barangay Central',
+      userName: user?.name || 'Anonymous Resident',
+    };
+
+    if (!isOnline) {
+      await saveReportOffline(reportPayload);
+      showToast('Saved offline. Will automatically sync when reconnected!', 'info');
+      setNewReport({ description: '', wasteType: 'Malata', locationName: 'Main Street Corner, Zone 2', imageUrl: '' });
+      return;
+    }
 
     try {
-      const res = await fetch(`${API_BASE_URL}/reports`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          wasteType,
-          addressText,
-          latitude: mockLat,
-          longitude: mockLng,
-          aiAssisted: !!aiResponse,
-        }),
+      await axios.post(`${API_BASE_URL}/reports`, reportPayload, {
+        headers: { Authorization: `Bearer ${token}` },
       });
-      const data = await res.json();
-      if (data.success) {
-        setAddressText('');
-        setAiResponse(null);
-        setImagePreview(null);
-        setAiInput('');
-      } else {
-        showToast(data.message, 'error');
-      }
+      showToast('Waste report submitted successfully!', 'success');
+      setNewReport({ description: '', wasteType: 'Malata', locationName: 'Main Street Corner, Zone 2', imageUrl: '' });
+      setActiveTab('reports');
+      fetchReports();
     } catch (err) {
-      showToast('Failed to submit report', 'error');
+      showToast('Failed to submit report.', 'error');
     }
   };
 
-  const handleCollect = async (id) => {
+  const handleStatusUpdate = async (reportId, newStatus) => {
     try {
-      const res = await fetch(`${API_BASE_URL}/reports/${id}/collect`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      const data = await res.json();
-      if (data.success) {
-        setPointHistory((prev) => [
-          { id: Date.now(), action: 'Valid Pickup Confirmed', points: '+10', date: 'Just now' },
-          ...prev,
-        ]);
-      } else {
-        showToast(data.message, 'error');
-      }
+      await axios.put(
+        `${API_BASE_URL}/reports/${reportId}/status`,
+        { status: newStatus },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      showToast(`Report updated to "${newStatus}"`, 'success');
+      fetchReports();
     } catch (err) {
-      showToast('Failed to mark as collected', 'error');
+      showToast('Failed to update status.', 'error');
     }
   };
 
-  const handleDelete = async (id) => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/reports/${id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      const data = await res.json();
-      if (!data.success) {
-        showToast(data.message, 'error');
-      }
-    } catch (err) {
-      showToast('Failed to cancel request', 'error');
+  // ---------------------------------------------------------------------------
+  // AI VISION CLASSIFIER
+  // ---------------------------------------------------------------------------
+  const handleAiClassify = async (e) => {
+    e.preventDefault();
+    if (!aiDesc && !aiImage) {
+      showToast('Please enter a description or image URL.', 'warning');
+      return;
     }
-  };
 
-  const handleAiCheck = async () => {
-    if (!aiInput && !imagePreview) return;
-    setIsAiLoading(true);
+    setAiAnalyzing(true);
+    setAiResult(null);
     try {
-      const res = await fetch(`${API_BASE_URL}/ai/classify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ itemDescription: aiInput, imageBase64: imagePreview }),
+      const res = await axios.post(`${API_BASE_URL}/ai/classify`, {
+        description: aiDesc,
+        imageUrl: aiImage,
       });
-      const data = await res.json();
-      if (data.success) {
-        setAiResponse(data.data);
-        setWasteType(data.data.classification);
-        showToast(`AI Classified: ${data.data.classification}`, 'info');
+      setAiResult(res.data);
+      if (res.data?.category) {
+        setNewReport((prev) => ({ ...prev, wasteType: res.data.category }));
       }
+      showToast('AI classification completed!', 'success');
     } catch (err) {
-      showToast('AI classification failed', 'error');
+      showToast('AI analysis failed. Please try again.', 'error');
     } finally {
-      setIsAiLoading(false);
+      setAiAnalyzing(false);
     }
   };
 
-  // CSV Export Handler for LGU Reports
-  const exportCSV = () => {
-    const headers = ['Report ID,Waste Type,Status,Address,Created At\n'];
-    const rows = reports.map(
-      (r) => `${r._id},${r.wasteType},${r.status},"${r.addressText.replace(/"/g, '""')}",${r.createdAt}`
-    );
-    const blob = new Blob([headers.concat(rows).join('\n')], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `E-Tapok_LGU_Report_${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    showToast('LGU waste report downloaded (.CSV)', 'success');
-  };
+  // Metrics Calculations
+  const safeReports = Array.isArray(reports) ? reports : [];
+  const totalReports = safeReports.length;
+  const malataCount = safeReports.filter((r) => r && r.wasteType === 'Malata').length;
+  const diliMalataCount = safeReports.filter((r) => r && r.wasteType === 'Dili Malata').length;
+  const collectedCount = safeReports.filter((r) => r && r.status === 'Collected').length;
+  const collectionRate = totalReports ? Math.round((collectedCount / totalReports) * 100) : 0;
 
-  const StatusBadge = ({ status }) => (
-    <span className={`px-2 py-0.5 text-xs font-semibold rounded-full ${
-      status === 'Collected' ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' : 'bg-amber-100 text-amber-800 border border-amber-300'
-    }`}>
-      {status === 'Collected' ? '✓ Collected' : '⏳ Pending'}
-    </span>
-  );
+  const filteredReports = safeReports.filter((r) => {
+    if (filterWasteType === 'All') return true;
+    return r && r.wasteType === filterWasteType;
+  });
 
-  const score = currentUser?.accountabilityScore || 100;
-  const nextMilestone = score >= 200 ? 500 : score >= 100 ? 200 : 100;
-  const progressPercent = Math.min(100, Math.round((score / nextMilestone) * 100));
-
-  if (!currentUser) {
+  // ===========================================================================
+  // VIEW 1: PUBLIC LANDING DASHBOARD (WHEN NOT LOGGED IN)
+  // ===========================================================================
+  if (!token || !user) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100 p-4 font-sans">
-        <div className="bg-white p-6 rounded-lg shadow-md w-full max-w-md border border-gray-200">
-          <h1 className="text-2xl font-bold text-center text-green-700 mb-1">E-Tapok Portal</h1>
-          <p className="text-xs text-center text-gray-500 mb-6">
-            {isRegistering ? 'Create a new account' : 'Sign in to access your portal'}
-          </p>
-
-          <form onSubmit={handleAuth} className="space-y-3">
-            {isRegistering && (
-              <>
-                <input
-                  type="text"
-                  placeholder="Full Name"
-                  className="w-full border p-2 rounded text-sm"
-                  value={authName}
-                  onChange={(e) => setAuthName(e.target.value)}
-                  required
-                />
-                <input
-                  type="text"
-                  placeholder="Barangay / Zone"
-                  className="w-full border p-2 rounded text-sm"
-                  value={authBarangay}
-                  onChange={(e) => setAuthBarangay(e.target.value)}
-                  required
-                />
-                <select
-                  className="w-full border p-2 rounded text-sm bg-white"
-                  value={authRole}
-                  onChange={(e) => setAuthRole(e.target.value)}
-                >
-                  <option value="Resident">Resident Role</option>
-                  <option value="Collector">Garbage Collector Role</option>
-                  <option value="Admin">Barangay Admin / LGU Official</option>
-                </select>
-              </>
-            )}
-
-            <input
-              type="email"
-              placeholder="Email Address"
-              className="w-full border p-2 rounded text-sm"
-              value={authEmail}
-              onChange={(e) => setAuthEmail(e.target.value)}
-              required
-            />
-            <input
-              type="password"
-              placeholder="Password"
-              className="w-full border p-2 rounded text-sm"
-              value={authPassword}
-              onChange={(e) => setAuthPassword(e.target.value)}
-              required
-            />
-
-            <button
-              type="submit"
-              className="w-full bg-green-600 text-white p-2 rounded font-bold hover:bg-green-700 text-sm cursor-pointer"
-            >
-              {isRegistering ? 'Register Account' : 'Sign In'}
-            </button>
-          </form>
-
-          <div className="mt-4 text-center">
-            <button
-              onClick={() => setIsRegistering(!isRegistering)}
-              className="text-xs text-blue-600 hover:underline font-semibold cursor-pointer"
-            >
-              {isRegistering ? 'Already have an account? Sign In' : "Don't have an account? Register"}
-            </button>
+      <div className="min-h-screen bg-gray-50 flex flex-col font-sans">
+        <header className="bg-emerald-800 text-white shadow-lg sticky top-0 z-40">
+          <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
+            <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setPublicView('public')}>
+              <span className="text-3xl">🌱</span>
+              <div>
+                <h1 className="font-black text-2xl tracking-wide">E-TAPOK</h1>
+                <p className="text-xs text-emerald-200">Public Municipal Waste Portal</p>
+              </div>
+            </div>
+            <div className="flex items-center space-x-3">
+              <button onClick={() => setPublicView('login')} className="bg-emerald-700 hover:bg-emerald-600 px-4 py-2 rounded-xl text-xs font-bold transition">Sign In</button>
+              <button onClick={() => setPublicView('register')} className="bg-emerald-500 hover:bg-emerald-400 text-emerald-950 px-4 py-2 rounded-xl text-xs font-black shadow transition">Report Waste</button>
+            </div>
           </div>
-        </div>
+        </header>
+
+        {publicView === 'login' || publicView === 'register' ? (
+          <div className="flex-grow flex items-center justify-center p-6 bg-emerald-950">
+            <div className="bg-white rounded-3xl shadow-2xl p-8 max-w-md w-full relative">
+              <button onClick={() => setPublicView('public')} className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 text-xs font-bold bg-gray-100 px-2.5 py-1 rounded-full">✕ Back</button>
+              <h2 className="text-2xl font-black text-emerald-800 text-center mb-1">{publicView === 'login' ? 'Sign In' : 'Register'}</h2>
+              <p className="text-xs text-gray-500 text-center mb-6">Access your local barangay portal</p>
+              
+              <form onSubmit={handleAuthSubmit} className="space-y-4">
+                {publicView === 'register' && (
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Full Name</label>
+                    <input type="text" required className="w-full border rounded-xl p-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none" value={authFormData.name} onChange={(e) => setAuthFormData({ ...authFormData, name: e.target.value })} />
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Email</label>
+                  <input type="email" required className="w-full border rounded-xl p-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none" value={authFormData.email} onChange={(e) => setAuthFormData({ ...authFormData, email: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Password</label>
+                  <input type="password" required className="w-full border rounded-xl p-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none" value={authFormData.password} onChange={(e) => setAuthFormData({ ...authFormData, password: e.target.value })} />
+                </div>
+                {publicView === 'register' && (
+                  <>
+                    <div>
+                      <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Role</label>
+                      <select className="w-full border rounded-xl p-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none" value={authFormData.role} onChange={(e) => setAuthFormData({ ...authFormData, role: e.target.value })}>
+                        <option value="Resident">Resident (Report Waste)</option>
+                        <option value="Collector">Garbage Collector (Manage Routes)</option>
+                        <option value="Admin">LGU Official (Executive Dashboard)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Barangay Zone</label>
+                      <input type="text" required className="w-full border rounded-xl p-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none" value={authFormData.barangay} onChange={(e) => setAuthFormData({ ...authFormData, barangay: e.target.value })} />
+                    </div>
+                  </>
+                )}
+                <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl shadow transition">{publicView === 'login' ? 'Sign In' : 'Register'}</button>
+              </form>
+            </div>
+          </div>
+        ) : (
+          <main className="flex-grow">
+            <section className="bg-emerald-800 text-white py-16 px-6 text-center">
+              <h2 className="text-4xl font-black mb-3">Smarter Segregation, Cleaner Barangays</h2>
+              <p className="text-emerald-100 max-w-xl mx-auto text-sm">Report uncollected waste, track garbage routes, and classify items into Malata or Dili Malata using AI.</p>
+            </section>
+            <section className="max-w-7xl mx-auto px-6 -mt-8">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div className="bg-white p-6 rounded-2xl shadow text-center"><p className="text-xs font-bold text-gray-400">Total Reports</p><p className="text-3xl font-black text-gray-800">{totalReports}</p></div>
+                <div className="bg-white p-6 rounded-2xl shadow text-center"><p className="text-xs font-bold text-gray-400">Collection Rate</p><p className="text-3xl font-black text-emerald-600">{collectionRate}%</p></div>
+                <div className="bg-white p-6 rounded-2xl shadow text-center"><p className="text-xs font-bold text-gray-400">Malata</p><p className="text-3xl font-black text-emerald-800">{malataCount}</p></div>
+                <div className="bg-white p-6 rounded-2xl shadow text-center"><p className="text-xs font-bold text-gray-400">Dili Malata</p><p className="text-3xl font-black text-amber-600">{diliMalataCount}</p></div>
+              </div>
+            </section>
+          </main>
+        )}
       </div>
     );
   }
 
+  // ===========================================================================
+  // VIEW 2: AUTHENTICATED USER PORTAL (RESIDENT / COLLECTOR / ADMIN)
+  // ===========================================================================
   return (
-    <div className="p-6 max-w-4xl mx-auto font-sans relative">
-      <div className="fixed top-5 right-5 z-50 space-y-2 pointer-events-none">
-        {toasts.map((toast) => (
-          <div
-            key={toast.id}
-            className={`pointer-events-auto px-4 py-3 rounded-lg shadow-lg text-white font-medium text-sm flex items-center justify-between min-w-64 ${
-              toast.type === 'success' ? 'bg-emerald-600' : toast.type === 'error' ? 'bg-rose-600' : 'bg-blue-600'
+    <div className="min-h-screen bg-gray-100 flex flex-col font-sans">
+      {/* Toast Notification */}
+      {toast && (
+        <div className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl shadow-lg text-white font-bold text-sm ${
+          toast.type === 'error' ? 'bg-red-600' : toast.type === 'success' ? 'bg-emerald-600' : 'bg-blue-600'
+        }`}>
+          {toast.message}
+        </div>
+      )}
+
+      {/* Offline Status Warning Bar */}
+      {!isOnline && (
+        <div className="bg-amber-600 text-white text-center py-2 px-4 font-bold text-xs sticky top-0 z-50">
+          ⚠️ Offline Mode Active — Reports will be stored locally until connection is restored.
+        </div>
+      )}
+
+      {/* Top Header */}
+      <header className="bg-emerald-800 text-white shadow-md">
+        <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
+          <div className="flex items-center space-x-3">
+            <span className="text-3xl">🌱</span>
+            <div>
+              <h1 className="font-black text-xl tracking-wide">E-TAPOK PORTAL</h1>
+              <p className="text-xs text-emerald-200">
+                {user.role} Dashboard • {user.barangay}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-4">
+            {isSyncing && (
+              <span className="text-xs bg-emerald-700 px-3 py-1 rounded-full animate-pulse">
+                🔄 Syncing Local Data...
+              </span>
+            )}
+            <div className="text-right hidden sm:block">
+              <p className="text-sm font-bold">{user.name}</p>
+              <p className="text-xs text-emerald-200">{user.email}</p>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="bg-emerald-950 hover:bg-emerald-900 px-4 py-2 rounded-xl text-xs font-bold border border-emerald-700 transition"
+            >
+              Sign Out
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Primary Navigation Tabs */}
+      <div className="bg-white border-b border-gray-200 sticky top-0 z-30 shadow-sm">
+        <div className="max-w-7xl mx-auto px-6 flex space-x-6 text-sm font-bold">
+          <button
+            onClick={() => setActiveTab('reports')}
+            className={`py-4 border-b-2 transition ${
+              activeTab === 'reports'
+                ? 'border-emerald-600 text-emerald-800'
+                : 'border-transparent text-gray-500 hover:text-gray-800'
             }`}
           >
-            <span>{toast.message}</span>
-          </div>
-        ))}
-      </div>
-
-      <div className="flex justify-between items-center mb-8 border-b pb-4">
-        <div>
-          <h1 className="text-2xl font-bold text-green-700">E-Tapok System</h1>
-          <p className="text-xs text-gray-500">
-            Logged in as: <strong className="text-gray-800">{currentUser.name}</strong> ({currentUser.role} - {currentUser.barangay})
-          </p>
+            📋 Barangay Feed ({safeReports.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('new-report')}
+            className={`py-4 border-b-2 transition ${
+              activeTab === 'new-report'
+                ? 'border-emerald-600 text-emerald-800'
+                : 'border-transparent text-gray-500 hover:text-gray-800'
+            }`}
+          >
+            ➕ Report Uncollected Waste
+          </button>
+          <button
+            onClick={() => setActiveTab('ai')}
+            className={`py-4 border-b-2 transition ${
+              activeTab === 'ai'
+                ? 'border-emerald-600 text-emerald-800'
+                : 'border-transparent text-gray-500 hover:text-gray-800'
+            }`}
+          >
+            🤖 Gemini AI Classifier
+          </button>
         </div>
-        <button onClick={handleLogout} className="text-xs bg-red-50 text-red-600 px-3 py-1.5 rounded border border-red-200 font-semibold cursor-pointer">
-          Logout
-        </button>
       </div>
 
-      {currentUser.role === 'Resident' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-          <div>
-            <div className="bg-gradient-to-br from-green-50 to-emerald-100 p-5 rounded-lg mb-6 border border-green-300 shadow-sm">
-              <div className="flex justify-between items-start">
-                <div>
-                  <h2 className="font-bold text-gray-700 text-sm">Accountability Score</h2>
-                  <p className="text-3xl font-extrabold text-green-700">{score} pts</p>
-                </div>
-                <span className="text-2xl">{score >= 200 ? '🥇' : score >= 100 ? '🥈' : '🥉'}</span>
-              </div>
+      {/* Main Content Area */}
+      <main className="max-w-7xl mx-auto px-6 py-8 flex-grow w-full space-y-6">
+        {/* Quick Analytics Header */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div className="bg-white p-5 rounded-2xl border shadow-sm text-center">
+            <span className="text-xs font-bold text-gray-400 uppercase">Total Reports</span>
+            <p className="text-2xl font-black text-gray-800 mt-1">{totalReports}</p>
+          </div>
+          <div className="bg-white p-5 rounded-2xl border shadow-sm text-center">
+            <span className="text-xs font-bold text-gray-400 uppercase">Collection Efficiency</span>
+            <p className="text-2xl font-black text-emerald-600 mt-1">{collectionRate}%</p>
+          </div>
+          <div className="bg-white p-5 rounded-2xl border shadow-sm text-center">
+            <span className="text-xs font-bold text-gray-400 uppercase">Malata (Bio)</span>
+            <p className="text-2xl font-black text-emerald-800 mt-1">{malataCount}</p>
+          </div>
+          <div className="bg-white p-5 rounded-2xl border shadow-sm text-center">
+            <span className="text-xs font-bold text-gray-400 uppercase">Dili Malata (Non-Bio)</span>
+            <p className="text-2xl font-black text-amber-600 mt-1">{diliMalataCount}</p>
+          </div>
+        </div>
 
-              <div className="mt-3">
-                <div className="flex justify-between text-xs font-semibold text-gray-600 mb-1">
-                  <span>Level: {score >= 200 ? 'Zero-Waste Champion' : score >= 100 ? 'Green Citizen' : 'Eco Novice'}</span>
-                  <span>{score}/{nextMilestone} pts</span>
-                </div>
-                <div className="w-full bg-gray-200 h-2 rounded-full overflow-hidden">
-                  <div className="bg-green-600 h-full transition-all duration-500" style={{ width: `${progressPercent}%` }}></div>
-                </div>
+        {/* TAB 1: REPORTS FEED */}
+        {activeTab === 'reports' && (
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-black text-gray-800">Barangay Waste Feed</h3>
+              <div className="flex items-center space-x-2 text-xs font-bold text-gray-600">
+                <span>Filter:</span>
+                <select
+                  className="border rounded-xl px-3 py-1.5 outline-none bg-white"
+                  value={filterWasteType}
+                  onChange={(e) => setFilterWasteType(e.target.value)}
+                >
+                  <option value="All">All Categories</option>
+                  <option value="Malata">Malata (Biodegradable)</option>
+                  <option value="Dili Malata">Dili Malata (Non-Bio)</option>
+                </select>
               </div>
-
-              <button
-                onClick={() => setShowRewardsModal(!showRewardsModal)}
-                className="mt-3 w-full bg-white text-green-800 border border-green-300 font-semibold py-1.5 px-3 rounded text-xs hover:bg-green-50 cursor-pointer shadow-xs"
-              >
-                🎁 View Perks & Point History
-              </button>
             </div>
 
-            {showRewardsModal && (
-              <div className="bg-white p-4 rounded-lg shadow border border-green-200 mb-6 text-xs">
-                <h4 className="font-bold text-gray-800 text-sm mb-2 border-b pb-1">Redeemable Barangay Perks</h4>
-                <ul className="space-y-2 mb-4">
-                  <li className="flex justify-between items-center p-2 bg-gray-50 rounded border">
-                    <span>🌱 Free Vegetable Seed Packets</span>
-                    <span className="font-bold text-green-700">50 pts</span>
-                  </li>
-                  <li className="flex justify-between items-center p-2 bg-gray-50 rounded border">
-                    <span>📄 50% Off Barangay Clearance Fee</span>
-                    <span className="font-bold text-green-700">150 pts</span>
-                  </li>
-                </ul>
+            {filteredReports.length === 0 ? (
+              <div className="bg-white p-12 rounded-2xl text-center border text-gray-400">
+                <p className="text-sm font-bold">No waste reports recorded yet.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {filteredReports.map((report) => (
+                  <div key={report._id || Math.random()} className="bg-white p-6 rounded-2xl border shadow-sm space-y-4">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <span className={`text-xs font-black px-3 py-1 rounded-full ${
+                          report.wasteType === 'Malata' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                        }`}>
+                          {report.wasteType || 'General Waste'}
+                        </span>
+                        <h4 className="font-extrabold text-base text-gray-900 mt-2">{report.description}</h4>
+                        <p className="text-xs text-gray-500">📍 {report.locationName || 'Unspecified Zone'}</p>
+                      </div>
 
-                <h4 className="font-bold text-gray-800 text-sm mb-2 border-b pb-1">Point History</h4>
-                <ul className="space-y-1">
-                  {pointHistory.map((item) => (
-                    <li key={item.id} className="flex justify-between text-gray-600 py-1 border-b border-gray-100">
-                      <span>{item.action} ({item.date})</span>
-                      <span className="font-bold text-green-600">{item.points}</span>
-                    </li>
-                  ))}
-                </ul>
+                      <span className={`text-xs font-bold px-3 py-1 rounded-xl ${
+                        report.status === 'Collected' ? 'bg-blue-100 text-blue-800' :
+                        report.status === 'In Progress' ? 'bg-amber-100 text-amber-800' : 'bg-orange-100 text-orange-800'
+                      }`}>
+                        {report.status || 'Pending'}
+                      </span>
+                    </div>
+
+                    {report.imageUrl && (
+                      <img src={report.imageUrl} alt="Report Waste" className="w-full h-44 object-cover rounded-xl border" />
+                    )}
+
+                    {/* Admin & Collector Status Controls */}
+                    {(user.role === 'Admin' || user.role === 'Collector') && (
+                      <div className="pt-2 border-t flex gap-2">
+                        <button
+                          onClick={() => handleStatusUpdate(report._id, 'In Progress')}
+                          className="flex-1 bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold text-xs py-2 rounded-xl transition"
+                        >
+                          Mark In Progress
+                        </button>
+                        <button
+                          onClick={() => handleStatusUpdate(report._id, 'Collected')}
+                          className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 rounded-xl transition"
+                        >
+                          Mark Collected
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
+          </div>
+        )}
 
-            <div className="bg-white p-4 rounded shadow border">
-              <h3 className="font-bold mb-2 text-sm">AI Waste Segregation Helper</h3>
-              <input
-                type="text"
-                placeholder="e.g. Banana peel, plastic bottle"
-                className="w-full border p-2 rounded mb-2 text-sm"
-                value={aiInput}
-                onChange={(e) => setAiInput(e.target.value)}
-              />
+        {/* TAB 2: CREATE WASTE REPORT */}
+        {activeTab === 'new-report' && (
+          <div className="max-w-2xl mx-auto bg-white p-8 rounded-3xl border shadow-sm space-y-6">
+            <div>
+              <h3 className="text-xl font-black text-gray-800">Submit Waste Report</h3>
+              <p className="text-xs text-gray-500">Notify municipal garbage collection trucks in real-time</p>
+            </div>
 
-              <div className="mb-3">
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleImageChange}
-                  className="w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 cursor-pointer"
+            <form onSubmit={handleCreateReport} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Waste Description</label>
+                <textarea
+                  required
+                  rows={3}
+                  placeholder="Describe the uncollected waste (e.g. 3 bags of yard trimmings and food leftovers)"
+                  className="w-full border rounded-xl p-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                  value={newReport.description}
+                  onChange={(e) => setNewReport({ ...newReport, description: e.target.value })}
                 />
-                {imagePreview && <img src={imagePreview} alt="Preview" className="w-16 h-16 mt-2 object-cover rounded border" />}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Segregation Type</label>
+                  <select
+                    className="w-full border rounded-xl p-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                    value={newReport.wasteType}
+                    onChange={(e) => setNewReport({ ...newReport, wasteType: e.target.value })}
+                  >
+                    <option value="Malata">Malata (Biodegradable)</option>
+                    <option value="Dili Malata">Dili Malata (Non-Bio)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Location / Zone</label>
+                  <input
+                    type="text"
+                    required
+                    className="w-full border rounded-xl p-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                    value={newReport.locationName}
+                    onChange={(e) => setNewReport({ ...newReport, locationName: e.target.value })}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Photo URL (Optional)</label>
+                <input
+                  type="url"
+                  placeholder="https://.../photo.jpg"
+                  className="w-full border rounded-xl p-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                  value={newReport.imageUrl}
+                  onChange={(e) => setNewReport({ ...newReport, imageUrl: e.target.value })}
+                />
               </div>
 
               <button
-                onClick={handleAiCheck}
-                disabled={isAiLoading || (!aiInput && !imagePreview)}
-                className="w-full bg-blue-600 text-white p-2 rounded font-semibold text-sm cursor-pointer disabled:opacity-50"
+                type="submit"
+                className="w-full bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-3.5 rounded-xl shadow transition"
               >
-                {isAiLoading ? 'Analyzing...' : 'Ask AI Vision Classifier'}
+                Submit Waste Pickup Request
               </button>
-
-              {aiResponse && (
-                <div className="text-xs p-3 bg-gray-50 border rounded mt-2">
-                  <p className="font-bold text-green-700">{aiResponse.classification}</p>
-                  <p className="mt-1">{aiResponse.explanation}</p>
-                </div>
-              )}
-            </div>
+            </form>
           </div>
+        )}
 
-          <div className="bg-white p-4 rounded shadow border">
-            <h3 className="font-bold mb-4 text-sm">Report Garbage Out</h3>
-            <form onSubmit={handleAddReport} className="mb-6">
+        {/* TAB 3: GEMINI AI CLASSIFIER */}
+        {activeTab === 'ai' && (
+          <div className="max-w-2xl mx-auto bg-white p-8 rounded-3xl border shadow-sm space-y-6">
+            <div className="text-center space-y-1">
+              <span className="text-3xl">🤖</span>
+              <h3 className="text-xl font-black text-gray-800">Gemini AI Waste Classifier</h3>
+              <p className="text-xs text-gray-500">Unsure whether item is Malata or Dili Malata? Ask Gemini vision AI.</p>
+            </div>
+
+            <form onSubmit={handleAiClassify} className="space-y-4">
               <input
                 type="text"
-                placeholder="Exact Location (e.g., Gate 3, Mabini St.)"
-                className="w-full border p-2 rounded mb-2 text-sm"
-                value={addressText}
-                onChange={(e) => setAddressText(e.target.value)}
-                required
+                placeholder="Item description (e.g., banana peel, plastic bottle, cardboard box)"
+                className="w-full border rounded-xl p-3 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                value={aiDesc}
+                onChange={(e) => setAiDesc(e.target.value)}
               />
-              <select
-                className="w-full border p-2 rounded mb-2 text-sm bg-white"
-                value={wasteType}
-                onChange={(e) => setWasteType(e.target.value)}
+              <input
+                type="url"
+                placeholder="Image URL (e.g. https://.../item.jpg)"
+                className="w-full border rounded-xl p-3 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                value={aiImage}
+                onChange={(e) => setAiImage(e.target.value)}
+              />
+
+              <button
+                type="submit"
+                disabled={aiAnalyzing}
+                className="w-full bg-emerald-800 hover:bg-emerald-900 text-white font-bold py-3.5 rounded-xl transition"
               >
-                <option value="Malata">Malata (Biodegradable)</option>
-                <option value="Dili Malata">Dili Malata (Non-Biodegradable)</option>
-              </select>
-              <button type="submit" className="w-full bg-green-600 text-white p-2 rounded font-semibold text-sm cursor-pointer">
-                Submit Pickup Request
+                {aiAnalyzing ? 'Analyzing Item with AI...' : 'Classify Item'}
               </button>
             </form>
 
-            <h3 className="font-bold mb-2 text-sm">My Active Reports</h3>
-            <ul className="space-y-2">
-              {reports.filter((r) => r.status === 'Pending').map((report) => (
-                <li key={report._id} className="flex justify-between items-center bg-gray-50 p-3 rounded border text-sm">
-                  <div>
-                    <div className="flex items-center space-x-2 mb-1">
-                      <span className="font-bold">{report.wasteType}</span>
-                      <StatusBadge status={report.status} />
-                    </div>
-                    <span className="text-xs text-gray-600">{report.addressText}</span>
-                  </div>
-                  <button onClick={() => handleDelete(report._id)} className="text-red-500 font-semibold text-xs cursor-pointer">
-                    Cancel
-                  </button>
-                </li>
-              ))}
-            </ul>
+            {aiResult && (
+              <div className="p-5 rounded-2xl bg-emerald-50 border border-emerald-200 text-center space-y-2">
+                <span className="text-xs font-bold text-emerald-800 uppercase">AI Recommendation</span>
+                <p className="text-3xl font-black text-emerald-900">{aiResult.category}</p>
+                {aiResult.explanation && <p className="text-xs text-emerald-700">{aiResult.explanation}</p>}
+              </div>
+            )}
           </div>
-        </div>
-      )}
-
-      {currentUser.role === 'Collector' && (
-        <div className="bg-white p-4 rounded shadow border">
-          <div className="flex justify-between items-center mb-4">
-            <input
-              type="text"
-              placeholder="Search by street or waste type..."
-              className="border p-2 rounded text-sm w-2/3"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-            />
-
-            <div className="flex bg-gray-100 p-1 rounded border">
-              <button
-                onClick={() => setViewMode('list')}
-                className={`px-3 py-1 rounded text-xs font-bold cursor-pointer ${
-                  viewMode === 'list' ? 'bg-white shadow text-green-700' : 'text-gray-600'
-                }`}
-              >
-                List View
-              </button>
-              <button
-                onClick={() => setViewMode('map')}
-                className={`px-3 py-1 rounded text-xs font-bold cursor-pointer ${
-                  viewMode === 'map' ? 'bg-white shadow text-green-700' : 'text-gray-600'
-                }`}
-              >
-                Map View
-              </button>
-            </div>
-          </div>
-
-          <h3 className="font-bold mb-3 text-sm">
-            Active Pickup Points ({reports.filter((r) => r.status === 'Pending').length})
-          </h3>
-
-          {viewMode === 'list' ? (
-            <div className="space-y-3">
-              {reports.map((report) => (
-                <div key={report._id} className="p-4 rounded border flex justify-between items-center bg-white">
-                  <div>
-                    <h4 className="font-bold text-base">{report.addressText}</h4>
-                    <div className="flex items-center space-x-2 mt-1">
-                      <span className={`px-2 py-0.5 rounded text-xs text-white font-medium ${report.wasteType === 'Malata' ? 'bg-green-600' : 'bg-gray-600'}`}>
-                        {report.wasteType}
-                      </span>
-                      <StatusBadge status={report.status} />
-                    </div>
-                  </div>
-                  {report.status === 'Pending' && (
-                    <button onClick={() => handleCollect(report._id)} className="bg-orange-500 text-white px-4 py-2 rounded font-bold text-sm cursor-pointer">
-                      Mark Collected
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="h-96 w-full rounded border overflow-hidden">
-              <MapContainer center={[10.1333, 124.8500]} zoom={14} style={{ height: '100%', width: '100%' }}>
-                <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-                {reports.map((report) => (
-                  <Marker
-                    key={report._id}
-                    position={[report.latitude || 10.1333, report.longitude || 124.8500]}
-                    icon={report.status === 'Collected' ? greenIcon : redIcon}
-                  >
-                    <Popup>
-                      <div className="p-1">
-                        <h4 className="font-bold text-sm">{report.addressText}</h4>
-                        <p className="text-xs text-gray-600 mt-1">Type: {report.wasteType}</p>
-                        {report.status === 'Pending' && (
-                          <button onClick={() => handleCollect(report._id)} className="bg-orange-500 text-white px-2 py-1 rounded text-xs font-bold w-full mt-2 cursor-pointer">
-                            Mark Collected
-                          </button>
-                        )}
-                      </div>
-                    </Popup>
-                  </Marker>
-                ))}
-              </MapContainer>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Phase 3: Barangay Admin & LGU Analytics View */}
-      {currentUser.role === 'Admin' && (
-        <div className="space-y-6">
-          <div className="flex justify-between items-center">
-            <h2 className="text-xl font-bold text-gray-800">Barangay Executive Analytics Dashboard</h2>
-            <button
-              onClick={exportCSV}
-              className="bg-green-700 text-white px-4 py-2 rounded text-xs font-bold hover:bg-green-800 shadow cursor-pointer flex items-center space-x-1"
-            >
-              <span>📥 Export LGU Report (.CSV)</span>
-            </button>
-          </div>
-
-          {/* Key Metrics Grid */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="bg-white p-4 rounded shadow border border-gray-200">
-              <p className="text-xs font-semibold text-gray-500">Total Reports Logged</p>
-              <p className="text-2xl font-black text-gray-800">{analytics.totalReports}</p>
-            </div>
-            <div className="bg-white p-4 rounded shadow border border-gray-200">
-              <p className="text-xs font-semibold text-gray-500">Pending Pickups</p>
-              <p className="text-2xl font-black text-amber-600">{analytics.pendingReports}</p>
-            </div>
-            <div className="bg-white p-4 rounded shadow border border-gray-200">
-              <p className="text-xs font-semibold text-gray-500">Collection Efficiency</p>
-              <p className="text-2xl font-black text-emerald-600">{analytics.collectionRate}%</p>
-            </div>
-            <div className="bg-white p-4 rounded shadow border border-gray-200">
-              <p className="text-xs font-semibold text-gray-500">Malata Segregation Ratio</p>
-              <p className="text-2xl font-black text-blue-600">{analytics.malataPercentage}%</p>
-            </div>
-          </div>
-
-          {/* Waste Breakdown Bar */}
-          <div className="bg-white p-5 rounded shadow border border-gray-200">
-            <h3 className="font-bold text-sm text-gray-800 mb-3">Waste Category Breakdown</h3>
-            <div className="w-full bg-gray-200 h-4 rounded-full overflow-hidden flex">
-              <div
-                className="bg-green-600 h-full transition-all duration-500"
-                style={{ width: `${analytics.malataPercentage}%` }}
-              ></div>
-              <div
-                className="bg-gray-600 h-full transition-all duration-500"
-                style={{ width: `${100 - analytics.malataPercentage}%` }}
-              ></div>
-            </div>
-            <div className="flex justify-between text-xs font-semibold mt-2">
-              <span className="text-green-700">🌱 Malata (Biodegradable): {analytics.malataCount}</span>
-              <span className="text-gray-700">📦 Dili Malata (Non-Bio): {analytics.diliMalataCount}</span>
-            </div>
-          </div>
-
-          {/* All Barangay Master Log Table */}
-          <div className="bg-white p-4 rounded shadow border border-gray-200">
-            <h3 className="font-bold text-sm text-gray-800 mb-3">All Live Pickup Requests</h3>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs border-collapse">
-                <thead>
-                  <tr className="bg-gray-100 border-b text-gray-700">
-                    <th className="p-2 font-bold">Location</th>
-                    <th className="p-2 font-bold">Category</th>
-                    <th className="p-2 font-bold">Status</th>
-                    <th className="p-2 font-bold">Date Created</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {reports.map((r) => (
-                    <tr key={r._id} className="border-b hover:bg-gray-50">
-                      <td className="p-2 font-semibold text-gray-800">{r.addressText}</td>
-                      <td className="p-2">
-                        <span className={`px-2 py-0.5 rounded text-white text-[10px] font-bold ${r.wasteType === 'Malata' ? 'bg-green-600' : 'bg-gray-600'}`}>
-                          {r.wasteType}
-                        </span>
-                      </td>
-                      <td className="p-2">
-                        <StatusBadge status={r.status} />
-                      </td>
-                      <td className="p-2 text-gray-500">{new Date(r.createdAt).toLocaleString()}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
+        )}
+      </main>
     </div>
   );
 }

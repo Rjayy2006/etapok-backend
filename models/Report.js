@@ -1,15 +1,45 @@
 const mongoose = require('mongoose');
 
-const reportSchema = new mongoose.Schema({
-  residentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  collectorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-  wasteType: { type: String, enum: ['Malata', 'Dili Malata'], required: true },
-  status: { type: String, enum: ['Pending', 'Collected', 'Cancelled'], default: 'Pending' },
-  addressText: { type: String, required: true },
-  latitude: { type: Number, default: 0 },
-  longitude: { type: Number, default: 0 },
-  aiAssisted: { type: Boolean, default: false },
-  collectedAt: { type: Date, default: null }
-}, { timestamps: true });
+const reportSchema = new mongoose.Schema(
+  {
+    description: {
+      type: String,
+      required: [true, 'Description is required'],
+      trim: true,
+    },
+    wasteType: {
+      type: String,
+      enum: ['Malata', 'Dili Malata'],
+      default: 'Malata',
+    },
+    locationName: {
+      type: String,
+      default: 'Unspecified Location',
+    },
+    imageUrl: {
+      type: String,
+      default: '',
+    },
+    barangay: {
+      type: String,
+      default: 'Barangay Central',
+    },
+    status: {
+      type: String,
+      enum: ['Pending', 'In Progress', 'Collected'],
+      default: 'Pending',
+    },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    userName: {
+      type: String,
+      default: 'Anonymous Resident',
+    },
+  },
+  { timestamps: true }
+);
 
 module.exports = mongoose.model('Report', reportSchema);
