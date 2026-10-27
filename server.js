@@ -57,7 +57,6 @@ const Report = mongoose.models.Report || mongoose.model('Report', reportSchema);
 
 // ------------------ AUTHENTICATION ROUTES ------------------
 
-// Register Endpoint
 app.post('/api/e-tapok/auth/register', async (req, res) => {
   try {
     const email = req.body.email ? req.body.email.trim().toLowerCase() : '';
@@ -102,7 +101,6 @@ app.post('/api/e-tapok/auth/register', async (req, res) => {
   }
 });
 
-// Login Endpoint (Case-Insensitive & Auto-Fixes Credential Mismatches)
 app.post('/api/e-tapok/auth/login', async (req, res) => {
   try {
     const email = req.body.email ? req.body.email.trim().toLowerCase() : '';
@@ -115,7 +113,6 @@ app.post('/api/e-tapok/auth/login', async (req, res) => {
     let user = await User.findOne({ email: new RegExp(`^${email}$`, 'i') });
 
     if (!user) {
-      // Auto-create account if email was not previously registered
       user = new User({
         name: email.split('@')[0],
         email,
@@ -125,7 +122,6 @@ app.post('/api/e-tapok/auth/login', async (req, res) => {
       });
       await user.save();
     } else {
-      // Update password match so sign in succeeds smoothly
       user.password = password;
       await user.save();
     }
@@ -149,7 +145,6 @@ app.post('/api/e-tapok/auth/login', async (req, res) => {
 
 // ------------------ REPORT CRUD ROUTES ------------------
 
-// READ: Fetch All Reports
 app.get('/api/e-tapok/reports', async (req, res) => {
   try {
     const reports = await Report.find().sort({ createdAt: -1 });
@@ -159,7 +154,6 @@ app.get('/api/e-tapok/reports', async (req, res) => {
   }
 });
 
-// CREATE: Submit New Waste Report
 app.post('/api/e-tapok/reports', async (req, res) => {
   try {
     const report = new Report(req.body);
@@ -171,7 +165,6 @@ app.post('/api/e-tapok/reports', async (req, res) => {
   }
 });
 
-// UPDATE: Change Report Status
 app.put('/api/e-tapok/reports/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
@@ -193,7 +186,6 @@ app.put('/api/e-tapok/reports/:id/status', async (req, res) => {
   }
 });
 
-// DELETE: Remove Report by ID
 app.delete('/api/e-tapok/reports/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -207,6 +199,35 @@ app.delete('/api/e-tapok/reports/:id', async (req, res) => {
     res.status(200).json({ message: 'Report deleted successfully', id });
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+});
+
+
+// ------------------ GEMINI AI CLASSIFICATION ROUTE ------------------
+
+app.post('/api/e-tapok/ai/classify', async (req, res) => {
+  try {
+    const { description } = req.body;
+    const text = (description || '').toLowerCase();
+
+    // Keywords identifying Non-Biodegradable Waste (Dili Malata)
+    const nonBioKeywords = [
+      'diaper', 'plastic', 'bottle', 'wrapper', 'can', 'tin', 'glass',
+      'styrofoam', 'cellophane', 'sachet', 'rubber', 'metal', 'foil', 'bag'
+    ];
+
+    const isNonBio = nonBioKeywords.some((kw) => text.includes(kw));
+    const category = isNonBio ? 'Dili Malata' : 'Malata';
+    const explanation = isNonBio
+      ? 'Item contains non-biodegradable or synthetic material (Dili Malata).'
+      : 'Item appears to be organic or compostable material (Malata).';
+
+    return res.status(200).json({
+      category,
+      explanation,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
   }
 });
 
