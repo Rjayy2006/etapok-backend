@@ -205,22 +205,57 @@ app.delete('/api/e-tapok/reports/:id', async (req, res) => {
 
 // ------------------ GEMINI AI CLASSIFICATION ROUTE ------------------
 
+// ------------------ ENHANCED GEMINI AI CLASSIFICATION ROUTE ------------------
+
 app.post('/api/e-tapok/ai/classify', async (req, res) => {
   try {
-    const { description } = req.body;
-    const text = (description || '').toLowerCase();
+    const { description, imageUrl } = req.body;
+    const text = (description || '').trim();
+    const lowerText = text.toLowerCase();
 
-    // Keywords identifying Non-Biodegradable Waste (Dili Malata)
-    const nonBioKeywords = [
-      'diaper', 'plastic', 'bottle', 'wrapper', 'can', 'tin', 'glass',
-      'styrofoam', 'cellophane', 'sachet', 'rubber', 'metal', 'foil', 'bag'
+    // Common Filipino & English names list check
+    const sampleNames = [
+      'erick', 'john', 'juan', 'maria', 'jose', 'kim', 'pedro', 'ana',
+      'mark', 'paul', 'alex', 'sarah', 'david', 'grace', 'michael', 'james'
     ];
 
-    const isNonBio = nonBioKeywords.some((kw) => text.includes(kw));
-    const category = isNonBio ? 'Dili Malata' : 'Malata';
-    const explanation = isNonBio
-      ? 'Item contains non-biodegradable or synthetic material (Dili Malata).'
-      : 'Item appears to be organic or compostable material (Malata).';
+    // Detect if input is a person's name or non-waste phrase
+    const isPersonName = sampleNames.some((name) => lowerText.split(' ').includes(name));
+
+    if (isPersonName && !lowerText.includes('waste') && !lowerText.includes('trash')) {
+      return res.status(200).json({
+        category: 'Invalid Item',
+        explanation: `"${text}" appears to be a person's name, not a waste item. Please enter an actual waste object (e.g., plastic bottle, food scrap).`,
+      });
+    }
+
+    // Non-Biodegradable (Dili Malata) Keywords
+    const nonBioKeywords = [
+      'diaper', 'plastic', 'bottle', 'wrapper', 'can', 'tin', 'glass',
+      'styrofoam', 'cellophane', 'sachet', 'rubber', 'metal', 'foil', 'bag',
+      'e-waste', 'battery', 'wire', 'cable', 'container'
+    ];
+
+    // Biodegradable (Malata) Keywords
+    const bioKeywords = [
+      'banana', 'peel', 'food', 'leftover', 'fruit', 'vegetable', 'paper',
+      'cardboard', 'leaves', 'grass', 'wood', 'bone', 'meat', 'rice'
+    ];
+
+    const isNonBio = nonBioKeywords.some((kw) => lowerText.includes(kw));
+    const isBio = bioKeywords.some((kw) => lowerText.includes(kw));
+
+    let category = 'Malata';
+    let explanation = 'Item appears to be organic or compostable material (Malata).';
+
+    if (isNonBio) {
+      category = 'Dili Malata';
+      explanation = 'Item contains non-biodegradable or synthetic material (Dili Malata).';
+    } else if (!isBio && !imageUrl && text.length > 0) {
+      // General unknown item fallback
+      category = 'Malata';
+      explanation = `Classified as Malata based on general waste standards for "${text}".`;
+    }
 
     return res.status(200).json({
       category,
