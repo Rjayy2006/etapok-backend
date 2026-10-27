@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { classifyWaste } = require('../controllers/aiController');
+const aiController = require('../controllers/aiController');
 
-router.post('/classify', classifyWaste);
+router.post('/classify', aiController.classifyWaste);
 
 module.exports = router;
