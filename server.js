@@ -8,6 +8,7 @@ require('dotenv').config();
 const app = express();
 const server = http.createServer(app);
 
+// Initialize Socket.io
 const io = new Server(server, {
   cors: {
     origin: '*',
@@ -15,21 +16,26 @@ const io = new Server(server, {
   },
 });
 
-// Middleware to attach socket.io to every request
+// Middleware to attach Socket.io instance to requests
 app.use((req, res, next) => {
   req.io = io;
   next();
 });
 
 app.use(cors());
-app.use(express.json());
 
+// INCREASE JSON & URLENCODED PAYLOAD LIMIT FOR BASE64 IMAGES
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
+
+// MongoDB Atlas Connection
 const MONGO_URI = process.env.MONGO_URI;
 mongoose
   .connect(MONGO_URI)
   .then(() => console.log('MongoDB Atlas connected successfully.'))
   .catch((err) => console.error('MongoDB Connection Error:', err));
 
+// Route Imports
 const reportRoutes = require('./routes/reportRoutes');
 app.use('/api/e-tapok', reportRoutes);
 
