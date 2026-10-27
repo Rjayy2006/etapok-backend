@@ -207,60 +207,97 @@ app.delete('/api/e-tapok/reports/:id', async (req, res) => {
 
 // ------------------ ENHANCED GEMINI AI CLASSIFICATION ROUTE ------------------
 
+// ------------------ HIGH-ACCURACY GEMINI AI ROUTE ------------------
+
 app.post('/api/e-tapok/ai/classify', async (req, res) => {
   try {
     const { description, imageUrl } = req.body;
+
+    if (!description && !imageUrl) {
+      return res.status(400).json({ message: 'Please provide a description or an image.' });
+    }
+
+    if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'YOUR_GEMINI_API_KEY') {
+      try {
+        // High precision configuration
+        const model = genAI.getGenerativeModel({
+          model: 'gemini-1.5-flash',
+          generationConfig: {
+            temperature: 0.1, // Near zero randomness for accurate classification
+            responseMimeType: 'application/json', // Strictly forces clean JSON format
+          },
+          systemInstruction: `You are the municipal waste classifier AI for Maasin City, Southern Leyte, Philippines (E-TAPOK Waste Portal).
+Your sole task is to classify waste items accurately into ONE of these 3 strict categories:
+
+1. "Malata" (Biodegradable / Organic waste: food leftovers, fruit & vegetable peels, paper, cardboard, leaves, wood, fish/meat bones, coconut husk/shell).
+2. "Dili Malata" (Non-biodegradable waste: plastics, diapers, sanitary pads, styrofoam, tin cans, glass bottles, rubber, e-waste, metals, sachets, cellophane wrappers).
+3. "Invalid Item" (Person names, human names, greetings, non-waste objects, unidentifiable random pictures, or gibberish).
+
+LANGUAGE RULES:
+- Recognize English, Tagalog, and Bisaya / Cebuano terms.
+
+FEW-SHOT EXAMPLES:
+- Input: "diaper" -> {"category": "Dili Malata", "explanation": "Diapers contain non-biodegradable plastic layers and synthetic absorbent polymers."}
+- Input: "Juan Dela Cruz" -> {"category": "Invalid Item", "explanation": "This input is a person's name, not a waste item."}
+- Input: "balat ng saging" -> {"category": "Malata", "explanation": "Banana peels are organic plant waste that naturally decomposes."}
+- Input: "sachet ng shampoo" -> {"category": "Dili Malata", "explanation": "Laminated foil and plastic sachets are non-biodegradable waste."}
+- Input: "tilapia bones" -> {"category": "Malata", "explanation": "Fish and animal bones are organic waste material."}
+`
+        });
+
+        const contents = [];
+
+        // Attach Image first if present (Vision priority)
+        if (imageUrl && imageUrl.startsWith('data:image')) {
+          const mimeType = imageUrl.substring(imageUrl.indexOf(':') + 1, imageUrl.indexOf(';'));
+          const base64Data = imageUrl.split(',')[1];
+          contents.push({
+            inlineData: {
+              data: base64Data,
+              mimeType: mimeType,
+            },
+          });
+        }
+
+        // Attach text prompt
+        const userPrompt = description
+          ? `Classify this item: "${description}".`
+          : 'Identify the waste item in this photo and classify it.';
+        contents.push(userPrompt);
+
+        const result = await model.generateContent(contents);
+        const parsedData = JSON.parse(result.response.text());
+
+        return res.status(200).json(parsedData);
+      } catch (geminiErr) {
+        console.warn('Gemini API call failed, falling back to smart rules:', geminiErr.message);
+      }
+    }
+
+    // Fallback Rule Engine if API Key is not loaded
     const text = (description || '').trim();
     const lowerText = text.toLowerCase();
 
-    // Common Filipino & English names list check
-    const sampleNames = [
-      'erick', 'john', 'juan', 'maria', 'jose', 'kim', 'pedro', 'ana',
-      'mark', 'paul', 'alex', 'sarah', 'david', 'grace', 'michael', 'james'
-    ];
-
-    // Detect if input is a person's name or non-waste phrase
+    const sampleNames = ['erick', 'john', 'juan', 'maria', 'jose', 'kim', 'pedro', 'ana', 'mark', 'sarah', 'david'];
     const isPersonName = sampleNames.some((name) => lowerText.split(' ').includes(name));
 
     if (isPersonName && !lowerText.includes('waste') && !lowerText.includes('trash')) {
       return res.status(200).json({
         category: 'Invalid Item',
-        explanation: `"${text}" appears to be a person's name, not a waste item. Please enter an actual waste object (e.g., plastic bottle, food scrap).`,
+        explanation: `"${text}" appears to be a person's name, not a waste item.`,
       });
     }
 
-    // Non-Biodegradable (Dili Malata) Keywords
-    const nonBioKeywords = [
-      'diaper', 'plastic', 'bottle', 'wrapper', 'can', 'tin', 'glass',
-      'styrofoam', 'cellophane', 'sachet', 'rubber', 'metal', 'foil', 'bag',
-      'e-waste', 'battery', 'wire', 'cable', 'container'
-    ];
-
-    // Biodegradable (Malata) Keywords
-    const bioKeywords = [
-      'banana', 'peel', 'food', 'leftover', 'fruit', 'vegetable', 'paper',
-      'cardboard', 'leaves', 'grass', 'wood', 'bone', 'meat', 'rice'
-    ];
-
+    const nonBioKeywords = ['diaper', 'plastic', 'bottle', 'wrapper', 'can', 'tin', 'glass', 'styrofoam', 'cellophane', 'sachet', 'rubber', 'metal', 'foil', 'bag'];
     const isNonBio = nonBioKeywords.some((kw) => lowerText.includes(kw));
-    const isBio = bioKeywords.some((kw) => lowerText.includes(kw));
-
-    let category = 'Malata';
-    let explanation = 'Item appears to be organic or compostable material (Malata).';
-
-    if (isNonBio) {
-      category = 'Dili Malata';
-      explanation = 'Item contains non-biodegradable or synthetic material (Dili Malata).';
-    } else if (!isBio && !imageUrl && text.length > 0) {
-      // General unknown item fallback
-      category = 'Malata';
-      explanation = `Classified as Malata based on general waste standards for "${text}".`;
-    }
 
     return res.status(200).json({
-      category,
-      explanation,
+      category: isNonBio ? 'Dili Malata' : 'Malata',
+      explanation: isNonBio
+        ? 'Contains non-biodegradable or synthetic materials (Dili Malata).'
+        : 'Appears to be organic or compostable material (Malata).',
     });
+
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
