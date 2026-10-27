@@ -30,6 +30,9 @@ export default function App() {
     barangay: 'Barangay Central',
   });
 
+  // User Current Geolocation State
+  const [currentGps, setCurrentGps] = useState({ lat: 10.1336, lng: 124.8415 });
+
   // Data & App Navigation State
   const [reports, setReports] = useState([]);
   const [activeTab, setActiveTab] = useState('reports');
@@ -46,31 +49,62 @@ export default function App() {
   const [newReport, setNewReport] = useState({
     description: '',
     wasteType: 'Malata',
-    locationName: 'Main Street Corner, Zone 2',
+    locationName: 'Lib-og',
+    lat: null,
+    lng: null,
     imageUrl: '',
   });
 
   const socketRef = useRef(null);
-  const mapContainerRef = useRef(null);
-  const leafletMapRef = useRef(null);
 
   const showToast = (message, type = 'info') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 4000);
   };
 
-  // Load Leaflet Map CSS Dynamically
+  // Detect Live Device Geolocation
   useEffect(() => {
-    if (!document.getElementById('leaflet-css')) {
-      const link = document.createElement('link');
-      link.id = 'leaflet-css';
-      link.rel = 'stylesheet';
-      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-      document.head.appendChild(link);
+    if ('geolocation' in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const lat = position.coords.latitude;
+          const lng = position.coords.longitude;
+          setCurrentGps({ lat, lng });
+        },
+        (err) => {
+          console.warn('Geolocation access denied:', err.message);
+        }
+      );
     }
   }, []);
 
-  // File Readers for Base64 Uploads
+  // GPS Button Handler
+  const handleGetGpsLocation = () => {
+    if ('geolocation' in navigator) {
+      showToast('Fetching GPS coordinates...', 'info');
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const lat = position.coords.latitude;
+          const lng = position.coords.longitude;
+          setCurrentGps({ lat, lng });
+          setNewReport((prev) => ({
+            ...prev,
+            lat,
+            lng,
+            locationName: prev.locationName || `GPS Location (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
+          }));
+          showToast('📍 GPS Location Captured!', 'success');
+        },
+        () => {
+          showToast('Could not fetch GPS location. Check browser permissions.', 'warning');
+        }
+      );
+    } else {
+      showToast('Geolocation is not supported by your browser.', 'error');
+    }
+  };
+
+  // File Upload Handlers
   const handleReportFileChange = (e) => {
     const file = e.target.files[0];
     if (file) {
@@ -93,32 +127,25 @@ export default function App() {
     }
   };
 
-  // Fetch Reports from Backend
+  // --- READ (R) ---
   const fetchReports = useCallback(async () => {
     try {
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
       const res = await axios.get(`${API_BASE_URL}/reports`, { headers });
-      
-      if (Array.isArray(res.data)) {
-        setReports(res.data);
-      } else if (res.data && Array.isArray(res.data.reports)) {
-        setReports(res.data.reports);
-      } else {
-        setReports([]);
-      }
+      setReports(Array.isArray(res.data) ? res.data : res.data.reports || []);
     } catch (err) {
       console.error('Error fetching reports:', err);
       setReports([]);
     }
   }, [token]);
 
-  // Offline Auto-Sync Logic
+  // Offline Sync
   const syncOfflineReports = useCallback(async () => {
     if (!isOnline || !token) return;
     try {
       const offlineData = await getOfflineReports();
       if (!offlineData || offlineData.length === 0) return;
-      
+
       setIsSyncing(true);
       for (const item of offlineData) {
         try {
@@ -139,9 +166,9 @@ export default function App() {
     }
   }, [isOnline, token, fetchReports]);
 
+  // Socket Listener Setup for Live Realtime CRUD Updates
   useEffect(() => {
     fetchReports();
-
     socketRef.current = io(SOCKET_URL, { transports: ['websocket', 'polling'] });
 
     socketRef.current.on('report_created', (data) => {
@@ -151,6 +178,12 @@ export default function App() {
     socketRef.current.on('report_updated', (updated) => {
       setReports((prev) =>
         Array.isArray(prev) ? prev.map((r) => (r._id === updated._id ? updated : r)) : []
+      );
+    });
+
+    socketRef.current.on('report_deleted', (deletedId) => {
+      setReports((prev) =>
+        Array.isArray(prev) ? prev.filter((r) => r._id !== deletedId) : []
       );
     });
 
@@ -164,34 +197,6 @@ export default function App() {
       syncOfflineReports();
     }
   }, [isOnline, syncOfflineReports]);
-
-  // Leaflet Interactive Map Initialization
-  useEffect(() => {
-    if (activeTab === 'map' && mapContainerRef.current) {
-      if (!leafletMapRef.current && window.L) {
-        const map = window.L.map(mapContainerRef.current).setView([10.3157, 123.8854], 13);
-        window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-          attribution: '© OpenStreetMap contributors',
-        }).addTo(map);
-
-        leafletMapRef.current = map;
-      }
-
-      // Add report markers
-      if (leafletMapRef.current && window.L) {
-        const safeArr = Array.isArray(reports) ? reports : [];
-        safeArr.forEach((r, idx) => {
-          if (r) {
-            const lat = 10.3157 + (idx * 0.005 - 0.01);
-            const lng = 123.8854 + (idx * 0.005 - 0.01);
-            window.L.marker([lat, lng])
-              .addTo(leafletMapRef.current)
-              .bindPopup(`<b>${r.wasteType || 'Waste'}</b><br>${r.description || ''}<br>📍 ${r.locationName || ''}`);
-          }
-        });
-      }
-    }
-  }, [activeTab, reports]);
 
   // Auth Handlers
   const handleAuthSubmit = async (e) => {
@@ -208,8 +213,7 @@ export default function App() {
       setUser(userData);
       showToast(`Welcome back, ${userData.name}!`, 'success');
     } catch (err) {
-      const errMsg = err.response?.data?.message || 'Authentication failed.';
-      showToast(errMsg, 'error');
+      showToast(err.response?.data?.message || 'Authentication failed.', 'error');
     }
   };
 
@@ -222,7 +226,7 @@ export default function App() {
     showToast('Signed out successfully.', 'info');
   };
 
-  // Report Creation & Status Management
+  // --- CREATE (C) ---
   const handleCreateReport = async (e) => {
     e.preventDefault();
     if (!newReport.description) {
@@ -232,6 +236,8 @@ export default function App() {
 
     const reportPayload = {
       ...newReport,
+      lat: newReport.lat || currentGps.lat,
+      lng: newReport.lng || currentGps.lng,
       barangay: user?.barangay || 'Barangay Central',
       userName: user?.name || 'Anonymous Resident',
     };
@@ -239,7 +245,7 @@ export default function App() {
     if (!isOnline) {
       await saveReportOffline(reportPayload);
       showToast('Saved offline. Will automatically sync when reconnected!', 'info');
-      setNewReport({ description: '', wasteType: 'Malata', locationName: 'Main Street Corner, Zone 2', imageUrl: '' });
+      setNewReport({ description: '', wasteType: 'Malata', locationName: 'Lib-og', lat: null, lng: null, imageUrl: '' });
       return;
     }
 
@@ -248,7 +254,7 @@ export default function App() {
         headers: { Authorization: `Bearer ${token}` },
       });
       showToast('Waste report submitted successfully!', 'success');
-      setNewReport({ description: '', wasteType: 'Malata', locationName: 'Main Street Corner, Zone 2', imageUrl: '' });
+      setNewReport({ description: '', wasteType: 'Malata', locationName: 'Lib-og', lat: null, lng: null, imageUrl: '' });
       setActiveTab('reports');
       fetchReports();
     } catch (err) {
@@ -256,6 +262,7 @@ export default function App() {
     }
   };
 
+  // --- UPDATE (U) ---
   const handleStatusUpdate = async (reportId, newStatus) => {
     try {
       await axios.put(
@@ -270,7 +277,22 @@ export default function App() {
     }
   };
 
-  // AI Classification Handler
+  // --- DELETE (D) ---
+  const handleDeleteReport = async (reportId) => {
+    if (!window.confirm('Are you sure you want to delete this waste report?')) return;
+
+    try {
+      await axios.delete(`${API_BASE_URL}/reports/${reportId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      showToast('Report deleted successfully.', 'info');
+      fetchReports();
+    } catch (err) {
+      showToast('Failed to delete report.', 'error');
+    }
+  };
+
+  // AI Classifier Handler
   const handleAiClassify = async (e) => {
     e.preventDefault();
     if (!aiDesc && !aiImage) {
@@ -291,7 +313,7 @@ export default function App() {
       }
       showToast('AI classification completed!', 'success');
     } catch (err) {
-      showToast('AI analysis failed. Please try again.', 'error');
+      showToast('AI analysis failed.', 'error');
     } finally {
       setAiAnalyzing(false);
     }
@@ -336,7 +358,7 @@ export default function App() {
               <button onClick={() => setPublicView('public')} className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 text-xs font-bold bg-gray-100 px-2.5 py-1 rounded-full">✕ Back</button>
               <h2 className="text-2xl font-black text-emerald-800 text-center mb-1">{publicView === 'login' ? 'Sign In' : 'Register'}</h2>
               <p className="text-xs text-gray-500 text-center mb-6">Access your local barangay portal</p>
-              
+
               <form onSubmit={handleAuthSubmit} className="space-y-4">
                 {publicView === 'register' && (
                   <div>
@@ -376,7 +398,7 @@ export default function App() {
           <main className="flex-grow">
             <section className="bg-emerald-800 text-white py-16 px-6 text-center">
               <h2 className="text-4xl font-black mb-3">Smarter Segregation, Cleaner Barangays</h2>
-              <p className="text-emerald-100 max-w-xl mx-auto text-sm">Report uncollected waste, track garbage routes, and classify items into Malata or Dili Malata using AI.</p>
+              <p className="text-emerald-100 max-w-xl mx-auto text-sm">Report uncollected waste, manage collection routes, and classify items into Malata or Dili Malata using AI.</p>
             </section>
             <section className="max-w-7xl mx-auto px-6 -mt-8">
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -392,7 +414,7 @@ export default function App() {
     );
   }
 
-  // Authenticated Portal
+  // Authenticated Portal Dashboard
   return (
     <div className="min-h-screen bg-gray-100 flex flex-col font-sans">
       {toast && (
@@ -441,7 +463,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* Navigation Tabs (Including Restored Live Map) */}
+      {/* Navigation Tabs */}
       <div className="bg-white border-b border-gray-200 sticky top-0 z-30 shadow-sm">
         <div className="max-w-7xl mx-auto px-6 flex space-x-6 text-sm font-bold">
           <button
@@ -453,17 +475,6 @@ export default function App() {
             }`}
           >
             📋 Barangay Feed ({safeReports.length})
-          </button>
-
-          <button
-            onClick={() => setActiveTab('map')}
-            className={`py-4 border-b-2 transition ${
-              activeTab === 'map'
-                ? 'border-emerald-600 text-emerald-800'
-                : 'border-transparent text-gray-500 hover:text-gray-800'
-            }`}
-          >
-            🗺️ Live Barangay Map
           </button>
 
           <button
@@ -510,7 +521,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* TAB 1: REPORTS FEED */}
+        {/* TAB 1: REPORTS FEED (READ, UPDATE, DELETE) */}
         {activeTab === 'reports' && (
           <div className="space-y-4">
             <div className="flex justify-between items-center">
@@ -545,12 +556,12 @@ export default function App() {
                           {report.wasteType || 'General Waste'}
                         </span>
                         <h4 className="font-extrabold text-base text-gray-900 mt-2">{report.description}</h4>
-                        <p className="text-xs text-gray-500">📍 {report.locationName || 'Unspecified Zone'}</p>
+                        <p className="text-xs text-gray-500 mt-1">📍 Location / Barangay: <span className="font-semibold text-gray-700">{report.locationName || 'Unspecified Zone'}</span></p>
                       </div>
 
                       <span className={`text-xs font-bold px-3 py-1 rounded-xl ${
-                        report.status === 'Collected' ? 'bg-blue-100 text-blue-800' :
-                        report.status === 'In Progress' ? 'bg-amber-100 text-amber-800' : 'bg-orange-100 text-orange-800'
+                        report.status === 'Collected' ? 'bg-emerald-100 text-emerald-800' :
+                        report.status === 'In Progress' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800'
                       }`}>
                         {report.status || 'Pending'}
                       </span>
@@ -560,22 +571,39 @@ export default function App() {
                       <img src={report.imageUrl} alt="Report Waste" className="w-full h-48 object-cover rounded-xl border" />
                     )}
 
-                    {(user.role === 'Admin' || user.role === 'Collector') && (
-                      <div className="pt-2 border-t flex gap-2">
-                        <button
-                          onClick={() => handleStatusUpdate(report._id, 'In Progress')}
-                          className="flex-1 bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold text-xs py-2 rounded-xl transition"
-                        >
-                          Mark In Progress
-                        </button>
-                        <button
-                          onClick={() => handleStatusUpdate(report._id, 'Collected')}
-                          className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 rounded-xl transition"
-                        >
-                          Mark Collected
-                        </button>
+                    <div className="pt-2 border-t flex items-center justify-between gap-2">
+                      <span className="text-xs text-gray-400 font-medium">
+                        Reported by: {report.userName || 'Resident'}
+                      </span>
+
+                      <div className="flex gap-2">
+                        {(user.role === 'Admin' || user.role === 'Collector') && (
+                          <>
+                            <button
+                              onClick={() => handleStatusUpdate(report._id, 'In Progress')}
+                              className="bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold text-xs px-3 py-2 rounded-xl transition"
+                            >
+                              In Progress
+                            </button>
+                            <button
+                              onClick={() => handleStatusUpdate(report._id, 'Collected')}
+                              className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3 py-2 rounded-xl transition"
+                            >
+                              Collected
+                            </button>
+                          </>
+                        )}
+
+                        {(user.role === 'Admin' || user.name === report.userName) && (
+                          <button
+                            onClick={() => handleDeleteReport(report._id)}
+                            className="bg-red-50 hover:bg-red-100 text-red-600 font-bold text-xs px-3 py-2 rounded-xl transition"
+                          >
+                            🗑️ Delete
+                          </button>
+                        )}
                       </div>
-                    )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -583,23 +611,12 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 2: LIVE MAP VIEW */}
-        {activeTab === 'map' && (
-          <div className="bg-white p-6 rounded-3xl border shadow-sm space-y-4">
-            <div>
-              <h3 className="text-xl font-black text-gray-800">Live Barangay Waste Map</h3>
-              <p className="text-xs text-gray-500">Real-time OpenStreetMap locations for pending and collected waste reports</p>
-            </div>
-            <div ref={mapContainerRef} className="w-full h-96 rounded-2xl border shadow-inner z-10"></div>
-          </div>
-        )}
-
-        {/* TAB 3: CREATE WASTE REPORT */}
+        {/* TAB 2: CREATE WASTE REPORT (CREATE) */}
         {activeTab === 'new-report' && (
           <div className="max-w-2xl mx-auto bg-white p-8 rounded-3xl border shadow-sm space-y-6">
             <div>
               <h3 className="text-xl font-black text-gray-800">Submit Waste Report</h3>
-              <p className="text-xs text-gray-500">Notify municipal garbage collection trucks in real-time</p>
+              <p className="text-xs text-gray-500">Provide the details and barangay location of the uncollected waste</p>
             </div>
 
             <form onSubmit={handleCreateReport} className="space-y-4">
@@ -608,7 +625,7 @@ export default function App() {
                 <textarea
                   required
                   rows={3}
-                  placeholder="Describe the uncollected waste"
+                  placeholder="Describe the uncollected waste (e.g., 2 bags of plastic bottles near the store)"
                   className="w-full border rounded-xl p-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
                   value={newReport.description}
                   onChange={(e) => setNewReport({ ...newReport, description: e.target.value })}
@@ -629,15 +646,26 @@ export default function App() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Location / Zone</label>
+                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Location / Barangay Name</label>
                   <input
                     type="text"
                     required
+                    placeholder="e.g. Abgao, Lib-og, Combado, Tunga-tunga"
                     className="w-full border rounded-xl p-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
                     value={newReport.locationName}
                     onChange={(e) => setNewReport({ ...newReport, locationName: e.target.value })}
                   />
                 </div>
+              </div>
+
+              <div>
+                <button
+                  type="button"
+                  onClick={handleGetGpsLocation}
+                  className="w-full bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold text-xs py-2.5 rounded-xl transition flex items-center justify-center space-x-1.5"
+                >
+                  <span>📡 Attach Current Device GPS Location</span>
+                </button>
               </div>
 
               <div>
@@ -672,7 +700,7 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 4: GEMINI AI CLASSIFIER */}
+        {/* TAB 3: GEMINI AI CLASSIFIER */}
         {activeTab === 'ai' && (
           <div className="max-w-2xl mx-auto bg-white p-8 rounded-3xl border shadow-sm space-y-6">
             <div className="text-center space-y-1">
