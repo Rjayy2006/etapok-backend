@@ -58,50 +58,34 @@ const Report = mongoose.models.Report || mongoose.model('Report', reportSchema);
 // ------------------ AUTHENTICATION ROUTES ------------------
 
 // Register Endpoint
-app.post('/api/e-tapok/auth/register', async (req, res) => {
-  try {
-    const { name, email, password, role, barangay } = req.body;
-    
-    let user = await User.findOne({ email });
-    if (user) {
-      return res.status(400).json({ message: 'User with this email already exists.' });
-    }
-
-    user = new User({ name, email, password, role, barangay });
-    await user.save();
-
-    const token = `token_${user._id}`;
-    res.status(201).json({
-      token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        barangay: user.barangay,
-      },
-    });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// Login Endpoint (Fixes 404 Error on Sign In)
+// Login Endpoint (Auto-registers user if email doesn't exist yet)
 app.post('/api/e-tapok/auth/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const email = req.body.email ? req.body.email.trim().toLowerCase() : '';
+    const password = req.body.password ? req.body.password.trim() : '';
 
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(400).json({ message: 'Invalid email or password.' });
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password are required.' });
     }
 
-    if (user.password !== password) {
-      return res.status(400).json({ message: 'Invalid email or password.' });
+    let user = await User.findOne({ email });
+
+    // Auto-create account if user does not exist in database yet
+    if (!user) {
+      user = new User({
+        name: email.split('@')[0],
+        email,
+        password,
+        role: 'Resident',
+        barangay: 'Barangay Central',
+      });
+      await user.save();
+    } else if (user.password !== password) {
+      return res.status(400).json({ message: 'Incorrect password.' });
     }
 
     const token = `token_${user._id}`;
-    res.status(200).json({
+    return res.status(200).json({
       token,
       user: {
         id: user._id,
@@ -112,10 +96,9 @@ app.post('/api/e-tapok/auth/login', async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    return res.status(500).json({ message: err.message });
   }
 });
-
 
 // ------------------ REPORT CRUD ROUTES ------------------
 
