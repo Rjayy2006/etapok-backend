@@ -1,9 +1,5 @@
 const Report = require('../models/Report');
 
-/**
- * GET /api/e-tapok/reports
- * Retrieve all reports sorted newest first
- */
 exports.getAllReports = async (req, res) => {
   try {
     const reports = await Report.find().sort({ createdAt: -1 });
@@ -17,13 +13,9 @@ exports.getAllReports = async (req, res) => {
   }
 };
 
-/**
- * POST /api/e-tapok/reports
- * Create a new waste report with safe fallbacks
- */
 exports.createReport = async (req, res) => {
   try {
-    const { description, wasteType, locationName, imageUrl, barangay, userName } = req.body;
+    const { description, wasteType, locationName, lat, lng, imageUrl, barangay, userName } = req.body;
 
     if (!description || typeof description !== 'string' || !description.trim()) {
       return res.status(400).json({ message: 'Waste description is required.' });
@@ -36,6 +28,8 @@ exports.createReport = async (req, res) => {
       description: description.trim(),
       wasteType: normalizedWasteType,
       locationName: locationName || 'Unspecified Location',
+      lat: typeof lat === 'number' ? lat : 10.3157,
+      lng: typeof lng === 'number' ? lng : 123.8854,
       imageUrl: imageUrl || '',
       barangay: barangay || req.user?.barangay || 'Barangay Central',
       userId: req.user?._id || null,
@@ -59,10 +53,6 @@ exports.createReport = async (req, res) => {
   }
 };
 
-/**
- * PUT /api/e-tapok/reports/:id/status
- * Update report collection status
- */
 exports.updateReportStatus = async (req, res) => {
   try {
     const { id } = req.params;

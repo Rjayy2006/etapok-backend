@@ -16,6 +16,14 @@ const reportSchema = new mongoose.Schema(
       type: String,
       default: 'Unspecified Location',
     },
+    lat: {
+      type: Number,
+      default: 10.3157,
+    },
+    lng: {
+      type: Number,
+      default: 123.8854,
+    },
     imageUrl: {
       type: String,
       default: '',
