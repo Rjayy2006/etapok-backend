@@ -24,7 +24,21 @@ app.use((req, res, next) => {
   next();
 });
 
-// Mongoose Schema Definition
+// ------------------ MONGOOSE SCHEMAS ------------------
+
+// 1. User Schema
+const userSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  role: { type: String, default: 'Resident' },
+  barangay: { type: String, default: 'Barangay Central' },
+  createdAt: { type: Date, default: Date.now },
+});
+
+const User = mongoose.models.User || mongoose.model('User', userSchema);
+
+// 2. Report Schema
 const reportSchema = new mongoose.Schema({
   description: { type: String, required: true },
   wasteType: { type: String, default: 'Malata' },
@@ -40,9 +54,72 @@ const reportSchema = new mongoose.Schema({
 
 const Report = mongoose.models.Report || mongoose.model('Report', reportSchema);
 
-// ------------------ API ROUTES ------------------
 
-// 1. READ (Get All Reports)
+// ------------------ AUTHENTICATION ROUTES ------------------
+
+// Register Endpoint
+app.post('/api/e-tapok/auth/register', async (req, res) => {
+  try {
+    const { name, email, password, role, barangay } = req.body;
+    
+    let user = await User.findOne({ email });
+    if (user) {
+      return res.status(400).json({ message: 'User with this email already exists.' });
+    }
+
+    user = new User({ name, email, password, role, barangay });
+    await user.save();
+
+    const token = `token_${user._id}`;
+    res.status(201).json({
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        barangay: user.barangay,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Login Endpoint (Fixes 404 Error on Sign In)
+app.post('/api/e-tapok/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(400).json({ message: 'Invalid email or password.' });
+    }
+
+    if (user.password !== password) {
+      return res.status(400).json({ message: 'Invalid email or password.' });
+    }
+
+    const token = `token_${user._id}`;
+    res.status(200).json({
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        barangay: user.barangay,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
+// ------------------ REPORT CRUD ROUTES ------------------
+
+// READ: Fetch All Reports
 app.get('/api/e-tapok/reports', async (req, res) => {
   try {
     const reports = await Report.find().sort({ createdAt: -1 });
@@ -52,7 +129,7 @@ app.get('/api/e-tapok/reports', async (req, res) => {
   }
 });
 
-// 2. CREATE (Submit New Report)
+// CREATE: Submit New Waste Report
 app.post('/api/e-tapok/reports', async (req, res) => {
   try {
     const report = new Report(req.body);
@@ -64,7 +141,7 @@ app.post('/api/e-tapok/reports', async (req, res) => {
   }
 });
 
-// 3. UPDATE (Change Report Status)
+// UPDATE: Change Report Status
 app.put('/api/e-tapok/reports/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
@@ -76,7 +153,7 @@ app.put('/api/e-tapok/reports/:id/status', async (req, res) => {
     );
 
     if (!updatedReport) {
-      return res.status(404).json({ message: 'Report not found' });
+      return res.status(404).json({ message: 'Report not found.' });
     }
 
     req.io.emit('report_updated', updatedReport);
@@ -86,14 +163,14 @@ app.put('/api/e-tapok/reports/:id/status', async (req, res) => {
   }
 });
 
-// 4. DELETE (Remove Report by ID) - FIXES THE 404 ERROR
+// DELETE: Remove Report by ID
 app.delete('/api/e-tapok/reports/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const deletedReport = await Report.findByIdAndDelete(id);
 
     if (!deletedReport) {
-      return res.status(404).json({ message: 'Report not found in database.' });
+      return res.status(404).json({ message: 'Report not found.' });
     }
 
     req.io.emit('report_deleted', id);
@@ -103,7 +180,9 @@ app.delete('/api/e-tapok/reports/:id', async (req, res) => {
   }
 });
 
-// Connect to MongoDB and Start Server
+
+// ------------------ SERVER INITIALIZATION ------------------
+
 const PORT = process.env.PORT || 5000;
 const MONGO_URI = process.env.MONGO_URI;
 
