@@ -30,6 +30,17 @@ app.use((req, res, next) => {
   next();
 });
 
+// Health check endpoint & automated Render keep-alive ping
+app.get('/health', (req, res) => res.status(200).send('OK'));
+
+setInterval(() => {
+  http.get('https://etapok-backend.onrender.com/health', (res) => {
+    console.log('Keep-alive ping sent to Render.');
+  }).on('error', (err) => {
+    console.error('Keep-alive ping error:', err.message);
+  });
+}, 14 * 60 * 1000); // 14-minute interval prevents free instance sleep
+
 // ------------------ MONGOOSE SCHEMAS ------------------
 
 const userSchema = new mongoose.Schema({
@@ -37,7 +48,7 @@ const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
   role: { type: String, enum: ['Resident', 'Collector', 'Admin'], default: 'Resident' },
-  barangay: { type: String, default: 'Barangay Central' },
+  barangay: { type: String, default: 'Abgao (Pob.)' },
   createdAt: { type: Date, default: Date.now },
 });
 
@@ -46,12 +57,12 @@ const User = mongoose.models.User || mongoose.model('User', userSchema);
 const reportSchema = new mongoose.Schema({
   description: { type: String, required: true },
   wasteType: { type: String, enum: ['Malata', 'Dili Malata'], default: 'Malata' },
-  locationName: { type: String, default: 'Unspecified Zone' },
+  locationName: { type: String, default: 'Abgao (Pob.)' },
   lat: Number,
   lng: Number,
   imageUrl: String,
   status: { type: String, enum: ['Pending', 'In Progress', 'Collected'], default: 'Pending' },
-  barangay: { type: String, default: 'Barangay Central' },
+  barangay: { type: String, default: 'Abgao (Pob.)' },
   userName: { type: String, default: 'Resident' },
   createdAt: { type: Date, default: Date.now },
 });
@@ -59,9 +70,7 @@ const reportSchema = new mongoose.Schema({
 const Report = mongoose.models.Report || mongoose.model('Report', reportSchema);
 
 
-// ------------------ AUTO-SEED MASTER ADMIN ACCOUNT ------------------
-
-// ------------------ AUTO-SEED / UPGRADE MASTER ADMIN ACCOUNT ------------------
+// ------------------ AUTO-SEED / UPGRADE MASTER ADMIN ------------------
 
 const seedMasterAdmin = async () => {
   try {
@@ -98,7 +107,7 @@ app.post('/api/e-tapok/auth/register', async (req, res) => {
       return res.status(400).json({ message: 'Email and password are required.' });
     }
 
-    // Security Rule: Block public registration of Admin accounts
+    // Security Rule: Public registration cannot create Admin accounts
     const safeRole = role === 'Admin' ? 'Resident' : (role || 'Resident');
 
     let user = await User.findOne({ email: new RegExp(`^${email}$`, 'i') });
@@ -115,7 +124,7 @@ app.post('/api/e-tapok/auth/register', async (req, res) => {
         email,
         password,
         role: safeRole,
-        barangay: barangay || 'Barangay Central',
+        barangay: barangay || 'Abgao (Pob.)',
       });
       await user.save();
     }
@@ -153,7 +162,7 @@ app.post('/api/e-tapok/auth/login', async (req, res) => {
         email,
         password,
         role: 'Resident',
-        barangay: 'Barangay Central',
+        barangay: 'Abgao (Pob.)',
       });
       await user.save();
     } else {
@@ -178,7 +187,7 @@ app.post('/api/e-tapok/auth/login', async (req, res) => {
 });
 
 
-// ------------------ USER MANAGEMENT ROUTES (ADMIN ONLY) ------------------
+// ------------------ USER DIRECTORY ROUTE (ADMIN ONLY) ------------------
 
 app.get('/api/e-tapok/users', async (req, res) => {
   try {
@@ -250,7 +259,7 @@ app.delete('/api/e-tapok/reports/:id', async (req, res) => {
 });
 
 
-// ------------------ HIGH-ACCURACY GEMINI AI CLASSIFIER ------------------
+// ------------------ GEMINI AI CLASSIFIER ROUTE ------------------
 
 app.post('/api/e-tapok/ai/classify', async (req, res) => {
   try {
@@ -277,13 +286,6 @@ Your sole task is to classify waste items accurately into ONE of these 3 strict 
 
 LANGUAGE RULES:
 - Recognize English, Tagalog, and Bisaya / Cebuano terms.
-
-FEW-SHOT EXAMPLES:
-- Input: "diaper" -> {"category": "Dili Malata", "explanation": "Diapers contain non-biodegradable plastic layers and synthetic absorbent polymers."}
-- Input: "Juan Dela Cruz" -> {"category": "Invalid Item", "explanation": "This input is a person's name, not a waste item."}
-- Input: "balat ng saging" -> {"category": "Malata", "explanation": "Banana peels are organic plant waste that naturally decomposes."}
-- Input: "sachet ng shampoo" -> {"category": "Dili Malata", "explanation": "Laminated foil and plastic sachets are non-biodegradable waste."}
-- Input: "tilapia bones" -> {"category": "Malata", "explanation": "Fish and animal bones are organic waste material."}
 `
         });
 
@@ -314,6 +316,7 @@ FEW-SHOT EXAMPLES:
       }
     }
 
+    // Fallback rule engine
     const text = (description || '').trim();
     const lowerText = text.toLowerCase();
 
@@ -352,17 +355,6 @@ mongoose
   .connect(MONGO_URI)
   .then(() => {
     seedMasterAdmin();
-    // Lightweight health check route
-app.get('/health', (req, res) => res.status(200).send('OK'));
-
-// Self-ping service to prevent Render free-tier sleep
-setInterval(() => {
-  http.get('https://etapok-backend.onrender.com/health', (res) => {
-    console.log('Keep-alive ping sent to Render.');
-  }).on('error', (err) => {
-    console.error('Keep-alive ping error:', err.message);
-  });
-}, 14 * 60 * 1000); // Pings every 14 minutes
     server.listen(PORT, () => {
       console.log(`Server listening on port ${PORT}`);
     });
