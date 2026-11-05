@@ -61,18 +61,24 @@ const Report = mongoose.models.Report || mongoose.model('Report', reportSchema);
 
 // ------------------ AUTO-SEED MASTER ADMIN ACCOUNT ------------------
 
+// ------------------ AUTO-SEED / UPGRADE MASTER ADMIN ACCOUNT ------------------
+
 const seedMasterAdmin = async () => {
   try {
-    const adminExists = await User.findOne({ role: 'Admin' });
-    if (!adminExists) {
-      const masterAdmin = new User({
+    let adminUser = await User.findOne({ email: 'admin@etapok.gov.ph' });
+    if (adminUser) {
+      adminUser.role = 'Admin';
+      await adminUser.save();
+      console.log('✅ Master Admin role verified: Admin');
+    } else {
+      adminUser = new User({
         name: 'Municipal LGU Admin',
         email: 'admin@etapok.gov.ph',
         password: 'admin123password',
         role: 'Admin',
         barangay: 'LGU Main Office',
       });
-      await masterAdmin.save();
+      await adminUser.save();
       console.log('✅ Master Admin initialized: admin@etapok.gov.ph / admin123password');
     }
   } catch (err) {
