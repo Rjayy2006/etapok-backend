@@ -1,13 +1,19 @@
+require('dotenv').config();
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 const server = http.createServer(app);
 
-// Socket.io Setup for Real-time Updates
+// Initialize Gemini AI SDK
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+
+// Socket.io Setup for Real-time Synchronization
 const io = new Server(server, {
   cors: {
     origin: '*',
@@ -18,7 +24,7 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Attach Socket instance to request object
+// Attach Socket.io instance to request object
 app.use((req, res, next) => {
   req.io = io;
   next();
@@ -31,22 +37,22 @@ const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
-  role: { type: String, default: 'Resident' },
+  role: { type: String, enum: ['Resident', 'Collector', 'Admin'], default: 'Resident' },
   barangay: { type: String, default: 'Barangay Central' },
   createdAt: { type: Date, default: Date.now },
 });
 
 const User = mongoose.models.User || mongoose.model('User', userSchema);
 
-// 2. Report Schema
+// 2. Waste Report Schema
 const reportSchema = new mongoose.Schema({
   description: { type: String, required: true },
-  wasteType: { type: String, default: 'Malata' },
-  locationName: { type: String, default: 'Unspecified' },
+  wasteType: { type: String, enum: ['Malata', 'Dili Malata'], default: 'Malata' },
+  locationName: { type: String, default: 'Unspecified Zone' },
   lat: Number,
   lng: Number,
   imageUrl: String,
-  status: { type: String, default: 'Pending' },
+  status: { type: String, enum: ['Pending', 'In Progress', 'Collected'], default: 'Pending' },
   barangay: { type: String, default: 'Barangay Central' },
   userName: { type: String, default: 'Resident' },
   createdAt: { type: Date, default: Date.now },
@@ -145,6 +151,7 @@ app.post('/api/e-tapok/auth/login', async (req, res) => {
 
 // ------------------ REPORT CRUD ROUTES ------------------
 
+// READ: Fetch all reports
 app.get('/api/e-tapok/reports', async (req, res) => {
   try {
     const reports = await Report.find().sort({ createdAt: -1 });
@@ -154,6 +161,7 @@ app.get('/api/e-tapok/reports', async (req, res) => {
   }
 });
 
+// CREATE: Submit new waste report
 app.post('/api/e-tapok/reports', async (req, res) => {
   try {
     const report = new Report(req.body);
@@ -165,6 +173,7 @@ app.post('/api/e-tapok/reports', async (req, res) => {
   }
 });
 
+// UPDATE: Change report pickup status
 app.put('/api/e-tapok/reports/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
@@ -186,6 +195,7 @@ app.put('/api/e-tapok/reports/:id/status', async (req, res) => {
   }
 });
 
+// DELETE: Remove report by ID
 app.delete('/api/e-tapok/reports/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -203,11 +213,7 @@ app.delete('/api/e-tapok/reports/:id', async (req, res) => {
 });
 
 
-// ------------------ GEMINI AI CLASSIFICATION ROUTE ------------------
-
-// ------------------ ENHANCED GEMINI AI CLASSIFICATION ROUTE ------------------
-
-// ------------------ HIGH-ACCURACY GEMINI AI ROUTE ------------------
+// ------------------ HIGH-ACCURACY GEMINI AI CLASSIFIER ------------------
 
 app.post('/api/e-tapok/ai/classify', async (req, res) => {
   try {
@@ -217,14 +223,14 @@ app.post('/api/e-tapok/ai/classify', async (req, res) => {
       return res.status(400).json({ message: 'Please provide a description or an image.' });
     }
 
+    // Attempt classification using Google Gemini Multimodal API
     if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'YOUR_GEMINI_API_KEY') {
       try {
-        // High precision configuration
         const model = genAI.getGenerativeModel({
           model: 'gemini-1.5-flash',
           generationConfig: {
-            temperature: 0.1, // Near zero randomness for accurate classification
-            responseMimeType: 'application/json', // Strictly forces clean JSON format
+            temperature: 0.1,
+            responseMimeType: 'application/json',
           },
           systemInstruction: `You are the municipal waste classifier AI for Maasin City, Southern Leyte, Philippines (E-TAPOK Waste Portal).
 Your sole task is to classify waste items accurately into ONE of these 3 strict categories:
@@ -247,7 +253,7 @@ FEW-SHOT EXAMPLES:
 
         const contents = [];
 
-        // Attach Image first if present (Vision priority)
+        // Attach Image Vision data if provided
         if (imageUrl && imageUrl.startsWith('data:image')) {
           const mimeType = imageUrl.substring(imageUrl.indexOf(':') + 1, imageUrl.indexOf(';'));
           const base64Data = imageUrl.split(',')[1];
@@ -270,15 +276,15 @@ FEW-SHOT EXAMPLES:
 
         return res.status(200).json(parsedData);
       } catch (geminiErr) {
-        console.warn('Gemini API call failed, falling back to smart rules:', geminiErr.message);
+        console.warn('Gemini API call failed, falling back to smart rules engine:', geminiErr.message);
       }
     }
 
-    // Fallback Rule Engine if API Key is not loaded
+    // ------------------ FALLBACK RULE-BASED ENGINE ------------------
     const text = (description || '').trim();
     const lowerText = text.toLowerCase();
 
-    const sampleNames = ['erick', 'john', 'juan', 'maria', 'jose', 'kim', 'pedro', 'ana', 'mark', 'sarah', 'david'];
+    const sampleNames = ['erick', 'john', 'juan', 'maria', 'jose', 'kim', 'pedro', 'ana', 'mark', 'sarah', 'david', 'alex', 'paul'];
     const isPersonName = sampleNames.some((name) => lowerText.split(' ').includes(name));
 
     if (isPersonName && !lowerText.includes('waste') && !lowerText.includes('trash')) {
@@ -307,7 +313,7 @@ FEW-SHOT EXAMPLES:
 // ------------------ SERVER INITIALIZATION ------------------
 
 const PORT = process.env.PORT || 5000;
-const MONGO_URI = process.env.MONGO_URI;
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/etapok_db';
 
 mongoose
   .connect(MONGO_URI)
