@@ -32,7 +32,6 @@ app.use((req, res, next) => {
 
 // ------------------ MONGOOSE SCHEMAS ------------------
 
-// 1. User Schema
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
@@ -44,7 +43,6 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.models.User || mongoose.model('User', userSchema);
 
-// 2. Waste Report Schema
 const reportSchema = new mongoose.Schema({
   description: { type: String, required: true },
   wasteType: { type: String, enum: ['Malata', 'Dili Malata'], default: 'Malata' },
@@ -61,6 +59,28 @@ const reportSchema = new mongoose.Schema({
 const Report = mongoose.models.Report || mongoose.model('Report', reportSchema);
 
 
+// ------------------ AUTO-SEED MASTER ADMIN ACCOUNT ------------------
+
+const seedMasterAdmin = async () => {
+  try {
+    const adminExists = await User.findOne({ role: 'Admin' });
+    if (!adminExists) {
+      const masterAdmin = new User({
+        name: 'Municipal LGU Admin',
+        email: 'admin@etapok.gov.ph',
+        password: 'admin123password',
+        role: 'Admin',
+        barangay: 'LGU Main Office',
+      });
+      await masterAdmin.save();
+      console.log('✅ Master Admin initialized: admin@etapok.gov.ph / admin123password');
+    }
+  } catch (err) {
+    console.error('Error seeding admin:', err.message);
+  }
+};
+
+
 // ------------------ AUTHENTICATION ROUTES ------------------
 
 app.post('/api/e-tapok/auth/register', async (req, res) => {
@@ -72,12 +92,15 @@ app.post('/api/e-tapok/auth/register', async (req, res) => {
       return res.status(400).json({ message: 'Email and password are required.' });
     }
 
+    // Security Rule: Block public registration of Admin accounts
+    const safeRole = role === 'Admin' ? 'Resident' : (role || 'Resident');
+
     let user = await User.findOne({ email: new RegExp(`^${email}$`, 'i') });
 
     if (user) {
       user.name = name || user.name;
       user.password = password;
-      user.role = role || user.role;
+      user.role = safeRole;
       user.barangay = barangay || user.barangay;
       await user.save();
     } else {
@@ -85,7 +108,7 @@ app.post('/api/e-tapok/auth/register', async (req, res) => {
         name: name || email.split('@')[0],
         email,
         password,
-        role: role || 'Resident',
+        role: safeRole,
         barangay: barangay || 'Barangay Central',
       });
       await user.save();
@@ -149,9 +172,20 @@ app.post('/api/e-tapok/auth/login', async (req, res) => {
 });
 
 
+// ------------------ USER MANAGEMENT ROUTES (ADMIN ONLY) ------------------
+
+app.get('/api/e-tapok/users', async (req, res) => {
+  try {
+    const users = await User.find({}, '-password').sort({ createdAt: -1 });
+    res.status(200).json(users);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
 // ------------------ REPORT CRUD ROUTES ------------------
 
-// READ: Fetch all reports
 app.get('/api/e-tapok/reports', async (req, res) => {
   try {
     const reports = await Report.find().sort({ createdAt: -1 });
@@ -161,7 +195,6 @@ app.get('/api/e-tapok/reports', async (req, res) => {
   }
 });
 
-// CREATE: Submit new waste report
 app.post('/api/e-tapok/reports', async (req, res) => {
   try {
     const report = new Report(req.body);
@@ -173,7 +206,6 @@ app.post('/api/e-tapok/reports', async (req, res) => {
   }
 });
 
-// UPDATE: Change report pickup status
 app.put('/api/e-tapok/reports/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
@@ -195,7 +227,6 @@ app.put('/api/e-tapok/reports/:id/status', async (req, res) => {
   }
 });
 
-// DELETE: Remove report by ID
 app.delete('/api/e-tapok/reports/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -223,7 +254,6 @@ app.post('/api/e-tapok/ai/classify', async (req, res) => {
       return res.status(400).json({ message: 'Please provide a description or an image.' });
     }
 
-    // Attempt classification using Google Gemini Multimodal API
     if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'YOUR_GEMINI_API_KEY') {
       try {
         const model = genAI.getGenerativeModel({
@@ -253,7 +283,6 @@ FEW-SHOT EXAMPLES:
 
         const contents = [];
 
-        // Attach Image Vision data if provided
         if (imageUrl && imageUrl.startsWith('data:image')) {
           const mimeType = imageUrl.substring(imageUrl.indexOf(':') + 1, imageUrl.indexOf(';'));
           const base64Data = imageUrl.split(',')[1];
@@ -265,7 +294,6 @@ FEW-SHOT EXAMPLES:
           });
         }
 
-        // Attach text prompt
         const userPrompt = description
           ? `Classify this item: "${description}".`
           : 'Identify the waste item in this photo and classify it.';
@@ -280,7 +308,6 @@ FEW-SHOT EXAMPLES:
       }
     }
 
-    // ------------------ FALLBACK RULE-BASED ENGINE ------------------
     const text = (description || '').trim();
     const lowerText = text.toLowerCase();
 
@@ -318,6 +345,7 @@ const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/etapok_db'
 mongoose
   .connect(MONGO_URI)
   .then(() => {
+    seedMasterAdmin();
     server.listen(PORT, () => {
       console.log(`Server listening on port ${PORT}`);
     });
