@@ -352,6 +352,17 @@ mongoose
   .connect(MONGO_URI)
   .then(() => {
     seedMasterAdmin();
+    // Lightweight health check route
+app.get('/health', (req, res) => res.status(200).send('OK'));
+
+// Self-ping service to prevent Render free-tier sleep
+setInterval(() => {
+  http.get('https://etapok-backend.onrender.com/health', (res) => {
+    console.log('Keep-alive ping sent to Render.');
+  }).on('error', (err) => {
+    console.error('Keep-alive ping error:', err.message);
+  });
+}, 14 * 60 * 1000); // Pings every 14 minutes
     server.listen(PORT, () => {
       console.log(`Server listening on port ${PORT}`);
     });
